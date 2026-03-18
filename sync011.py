@@ -7,10 +7,10 @@
 
 Maud Sync Tool
 --------------
-Manual L/R sync helper for dual Insta360 INSV video.
+Manual L/R sync helper for dual Insta360 sources (INSV or MOV/MP4 exports).
 
 Main ideas:
-- Pick left/right INSV.
+- Pick left/right video.
 - Build short preview frame stacks from BOTH lenses -> equirect.
 - Step frames independently until sync looks right.
 - Generate a clean ffmpeg .sh script for full render.
@@ -82,6 +82,18 @@ DEFAULT_PREVIEW_HEIGHT = 720
 
 class ToolError(RuntimeError):
     pass
+
+
+def is_insv(path: Path) -> bool:
+    return path.suffix.lower() == ".insv"
+
+
+def source_mode_for_pair(left: Path, right: Path) -> str:
+    left_is_insv = is_insv(left)
+    right_is_insv = is_insv(right)
+    if left_is_insv != right_is_insv:
+        raise ToolError("Left/right must both be INSV or both be MOV/MP4 style files.")
+    return "insv" if left_is_insv else "flat"
 
 
 @dataclass
@@ -160,6 +172,44 @@ def count_preview_frames(directory: Path) -> int:
     return len(list(directory.glob("frame_*.jpg")))
 
 
+def preview_cache_tag(value: float) -> str:
+    return f"{value:.3f}".replace("-", "m").replace(".", "p")
+
+
+def build_preview_dir_name(
+    src: Path,
+    preview_seconds: int,
+    preview_height: int,
+    fov: float,
+    yaw: float,
+    use_insv_pipeline: bool,
+) -> str:
+    mode_tag = "insv" if use_insv_pipeline else "flat"
+    return (
+        f"{src.stem}__{mode_tag}__ps{preview_seconds}"
+        f"__h{preview_height}__fov{preview_cache_tag(fov)}__yaw{preview_cache_tag(yaw)}__frames"
+    )
+
+
+def preview_cache_metadata(
+    src: Path,
+    preview_seconds: int,
+    preview_height: int,
+    fov: float,
+    yaw: float,
+    use_insv_pipeline: bool,
+) -> dict[str, object]:
+    return {
+        "src_name": src.name,
+        "src_mtime_ns": src.stat().st_mtime_ns,
+        "preview_seconds": preview_seconds,
+        "preview_height": preview_height,
+        "fov": round(fov, 6),
+        "yaw": round(yaw, 6),
+        "use_insv_pipeline": use_insv_pipeline,
+    }
+
+
 def build_preview_frames(
     src: Path,
     out_dir: Path,
@@ -167,13 +217,33 @@ def build_preview_frames(
     fov: float,
     yaw: float,
     preview_height: int,
+    use_insv_pipeline: bool,
 ) -> PreviewSet:
     out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("frame_*.jpg"):
-        old.unlink()
-
     info = ffprobe_video_info(src, stream="v:0")
     fps = info.fps or DEFAULT_FPS
+    cache_meta_path = out_dir / "preview_meta.json"
+    expected_meta = preview_cache_metadata(src, preview_seconds, preview_height, fov, yaw, use_insv_pipeline)
+
+    try:
+        if cache_meta_path.exists():
+            cached_meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
+            first = out_dir / "frame_000001.jpg"
+            frame_count = count_preview_frames(out_dir)
+            if cached_meta == expected_meta and first.exists() and frame_count > 0:
+                frame_info = ffprobe_video_info(first)
+                return PreviewSet(
+                    dir_path=out_dir,
+                    fps=fps,
+                    frame_count=frame_count,
+                    width=frame_info.width,
+                    height=frame_info.height,
+                )
+    except Exception:
+        pass
+
+    for old in out_dir.glob("frame_*.jpg"):
+        old.unlink()
 
     cmd = [
         "ffmpeg",
@@ -185,9 +255,13 @@ def build_preview_frames(
         str(src),
         "-filter_complex",
         (
-            f"[0:v:0][0:v:1]hstack[df];"
-            f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
-            f"scale=-2:{preview_height}[v]"
+            (
+                f"[0:v:0][0:v:1]hstack[df];"
+                f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
+                f"scale=-2:{preview_height}[v]"
+            )
+            if use_insv_pipeline
+            else f"[0:v:0]scale=-2:{preview_height}[v]"
         ),
         "-map",
         "[v]",
@@ -201,6 +275,7 @@ def build_preview_frames(
         raise ToolError(f"Preview build created no frames for {src.name}")
     frame_info = ffprobe_video_info(first)
     frame_count = count_preview_frames(out_dir)
+    cache_meta_path.write_text(json.dumps(expected_meta, indent=2), encoding="utf-8")
     return PreviewSet(
         dir_path=out_dir,
         fps=fps,
@@ -249,6 +324,32 @@ def shell_quote(path: str) -> str:
     return shlex.quote(path)
 
 
+def metadata_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_embedded_meta1(recipe_cmd: str) -> str:
+    return f"MYC_META1:{recipe_cmd}"
+
+
+def build_embedded_meta2() -> str:
+    return ""
+
+
+def read_jpg_comment(path: Path) -> str:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format_tags=comment",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    return run_checked(cmd).strip()
+
+
 def build_image_script_text(
     left_file: Path,
     right_file: Path,
@@ -265,9 +366,53 @@ def build_image_script_text(
     fov_right: float,
     yaw_left: float,
     yaw_right: float,
+    use_insv_pipeline: bool,
 ) -> str:
     left_ts = left_frame_index / max(fps, 0.001)
     right_ts = right_frame_index / max(fps, 0.001)
+
+    if use_insv_pipeline:
+        filter_graph = (
+            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0a]; "
+            f"[0:v:1]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0b]; "
+            f"[f0a][f0b]hstack[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0a]; "
+            f"[1:v:1]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0b]; "
+            f"[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    else:
+        filter_graph = (
+            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[lv]; "
+            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[rv]; "
+            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        )
+
+    recipe_cmd = " ".join(
+        [
+            "ffmpeg -hide_banner",
+            f"-i {shlex.quote(left_file.name)}",
+            f"-i {shlex.quote(right_file.name)}",
+            f'-filter_complex {shlex.quote(filter_graph)}',
+            '-map "[v]"',
+            "-frames:v 1",
+            "-update 1",
+            "-q:v 1",
+            shlex.quote(output_jpg),
+        ]
+    )
+    meta1 = metadata_escape(build_embedded_meta1(recipe_cmd))
+    meta2 = metadata_escape(build_embedded_meta2())
 
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -301,26 +446,12 @@ ffmpeg -hide_banner \
   -i "$LEFT_FILE" \
   -i "$RIGHT_FILE" \
   -filter_complex "\
-[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0a]; \
-[0:v:1]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0b]; \
-[f0a][f0b]hstack[dfL]; \
-[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; \
-[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0a]; \
-[1:v:1]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0b]; \
-[g0a][g0b]hstack[dfR]; \
-[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; \
-[lv0]crop='iw/4':ih:0:0[r1]; \
-[lv12]crop='iw/2':ih:'iw/4':0[r23]; \
-[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; \
-[rv0]crop='iw/4':ih:0:0[r5]; \
-[rv12]crop='iw/2':ih:'iw/4':0[r67]; \
-[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; \
-[r5][r23][r8]hstack=inputs=3[top]; \
-[r1][r67][r4]hstack=inputs=3[bot]; \
-[top][bot]vstack,scale={target_res}:{target_res}[v]" \
+{filter_graph}" \
   -map "[v]" \
   -frames:v 1 \
   -update 1 \
+  -metadata comment="{meta1}" \
+  -metadata description="{meta2}" \
   -q:v 1 \
   "$OUT_JPG"
 '''
@@ -337,7 +468,35 @@ def build_fast_batch_image_dump_script_text(
     fov_right: float,
     yaw_left: float,
     yaw_right: float,
+    use_insv_pipeline: bool,
 ) -> str:
+    if use_insv_pipeline:
+        filter_graph = (
+            "[0:v:0]format=rgb24[f0a]; "
+            "[0:v:1]format=rgb24[f0b]; "
+            "[f0a][f0b]hstack[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            "[1:v:0]format=rgb24[g0a]; "
+            "[1:v:1]format=rgb24[g0b]; "
+            "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    else:
+        filter_graph = (
+            "[0:v:0]format=rgb24[lv]; "
+            "[1:v:0]format=rgb24[rv]; "
+            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        )
+
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -362,23 +521,7 @@ ffmpeg -hide_banner -y -t "$PREVIEW_SECONDS" \
   -i "$LEFT_FILE" \
   -i "$RIGHT_FILE" \
   -filter_complex "\
-[0:v:0]format=rgb24[f0a]; \
-[0:v:1]format=rgb24[f0b]; \
-[f0a][f0b]hstack[dfL]; \
-[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; \
-[1:v:0]format=rgb24[g0a]; \
-[1:v:1]format=rgb24[g0b]; \
-[g0a][g0b]hstack[dfR]; \
-[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; \
-[lv0]crop='iw/4':ih:0:0[r1]; \
-[lv12]crop='iw/2':ih:'iw/4':0[r23]; \
-[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; \
-[rv0]crop='iw/4':ih:0:0[r5]; \
-[rv12]crop='iw/2':ih:'iw/4':0[r67]; \
-[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; \
-[r5][r23][r8]hstack=inputs=3[top]; \
-[r1][r67][r4]hstack=inputs=3[bot]; \
-[top][bot]vstack,scale={target_res}:{target_res}[v]" \
+{filter_graph}" \
   -map "[v]" \
   -q:v 1 \
   "$OUT_DIR/$STEM"_%06d.jpg
@@ -403,6 +546,7 @@ def build_batch_image_dump_script_text(
     yaw_right: float,
     left_preview_count: int,
     right_preview_count: int,
+    use_insv_pipeline: bool,
 ) -> str:
     if offset_frames >= 0:
         left_start = 0
@@ -413,11 +557,38 @@ def build_batch_image_dump_script_text(
         right_start = 0
         pair_count = min(max(0, left_preview_count + offset_frames), right_preview_count)
 
+    if use_insv_pipeline:
+        filter_graph = (
+            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0a]; "
+            "[0:v:1]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0b]; "
+            "[f0a][f0b]hstack[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0a]; "
+            "[1:v:1]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0b]; "
+            "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    else:
+        filter_graph = (
+            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[lv]; "
+            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[rv]; "
+            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        )
+
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
 
 # Auto-generated by Maud Sync Tool
-# Batch dump of synced 3D360 stills from ORIGINAL INSV files
+# Batch dump of synced stills from original source files
 # Preview sync offset decides which L/R frame pairs are used.
 
 LEFT_FILE={shell_quote(left_file.name)}
@@ -445,23 +616,7 @@ for ((i=0; i<PAIR_COUNT; i++)); do
     -i "$LEFT_FILE" \
     -i "$RIGHT_FILE" \
     -filter_complex "\
-[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0a]; \
-[0:v:1]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0b]; \
-[f0a][f0b]hstack[dfL]; \
-[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; \
-[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0a]; \
-[1:v:1]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0b]; \
-[g0a][g0b]hstack[dfR]; \
-[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; \
-[lv0]crop='iw/4':ih:0:0[r1]; \
-[lv12]crop='iw/2':ih:'iw/4':0[r23]; \
-[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; \
-[rv0]crop='iw/4':ih:0:0[r5]; \
-[rv12]crop='iw/2':ih:'iw/4':0[r67]; \
-[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; \
-[r5][r23][r8]hstack=inputs=3[top]; \
-[r1][r67][r4]hstack=inputs=3[bot]; \
-[top][bot]vstack,scale={target_res}:{target_res}[v]" \
+{filter_graph}" \
     -map "[v]" \
     -frames:v 1 \
     -update 1 \
@@ -490,6 +645,7 @@ def build_ffmpeg_script_text(
     yaw_right: float,
     test_seconds: int,
     include_test_duration: bool,
+    use_insv_pipeline: bool,
 ) -> str:
     trim_seconds = abs(offset_frames) / max(fps, 0.001)
     trim_str = f"{trim_seconds:.6f}"
@@ -510,6 +666,33 @@ def build_ffmpeg_script_text(
         left_trim_a = f",atrim=start={trim_str},asetpts=PTS-STARTPTS"
 
     duration_line = '  -t "$TEST_SECONDS" \\\n' if include_test_duration else ""
+
+    if use_insv_pipeline:
+        video_graph = (
+            f"[0:v:0]{left_trim_v0}format=rgb24[f0a]; "
+            f"[0:v:1]{left_trim_v1}format=rgb24[f0b]; "
+            "[f0a][f0b]hstack[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            f"[1:v:0]{right_trim_v0}format=rgb24[g0a]; "
+            f"[1:v:1]{right_trim_v1}format=rgb24[g0b]; "
+            "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    else:
+        video_graph = (
+            f"[0:v:0]{left_trim_v0}format=rgb24[lv]; "
+            f"[1:v:0]{right_trim_v0}format=rgb24[rv]; "
+            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        )
 
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -557,23 +740,7 @@ ffmpeg -hide_banner \
 {duration_line}  -i "$LEFT_FILE" \
   -i "$RIGHT_FILE" \
   -filter_complex "\
-[0:v:0]{left_trim_v0}format=rgb24[f0a]; \
-[0:v:1]{left_trim_v1}format=rgb24[f0b]; \
-[f0a][f0b]hstack[dfL]; \
-[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; \
-[1:v:0]{right_trim_v0}format=rgb24[g0a]; \
-[1:v:1]{right_trim_v1}format=rgb24[g0b]; \
-[g0a][g0b]hstack[dfR]; \
-[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; \
-[lv0]crop='iw/4':ih:0:0[r1]; \
-[lv12]crop='iw/2':ih:'iw/4':0[r23]; \
-[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; \
-[rv0]crop='iw/4':ih:0:0[r5]; \
-[rv12]crop='iw/2':ih:'iw/4':0[r67]; \
-[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; \
-[r5][r23][r8]hstack=inputs=3[top]; \
-[r1][r67][r4]hstack=inputs=3[bot]; \
-[top][bot]vstack,scale={target_res}:{target_res}[v]; \
+{video_graph}; \
 [0:a]pan=mono|c0=c0{left_trim_a}[a0]; \
 [1:a]pan=mono|c0=c0{right_trim_a}[a1]; \
 [a0][a1]join=inputs=2:channel_layout=stereo[a]" \
@@ -634,9 +801,9 @@ class MainWindow(QMainWindow):
         btn_build = QPushButton("Preview")
         btn_build.clicked.connect(self.build_previews)
 
-        pick_row.addWidget(QLabel("Left INSV:"), 0, 0)
+        pick_row.addWidget(QLabel("Left video:"), 0, 0)
         pick_row.addWidget(self.left_combo, 0, 1)
-        pick_row.addWidget(QLabel("Right INSV:"), 1, 0)
+        pick_row.addWidget(QLabel("Right video:"), 1, 0)
         pick_row.addWidget(self.right_combo, 1, 1)
         pick_row.addWidget(btn_refresh, 0, 2)
         pick_row.addWidget(btn_build, 1, 2)
@@ -698,6 +865,11 @@ class MainWindow(QMainWindow):
         self.right_frame_box = QSpinBox()
         self.right_frame_box.setRange(0, 10_000_000)
         self.right_frame_box.valueChanged.connect(self.on_right_frame_changed)
+        self.jump_edit = QLineEdit()
+        self.jump_edit.setPlaceholderText("sec, frame, or mm:ss")
+        self.jump_edit.returnPressed.connect(self.jump_to_position)
+        btn_jump = QPushButton("Jump")
+        btn_jump.clicked.connect(self.jump_to_position)
 
         btn_l_prev = QPushButton("L -")
         btn_l_next = QPushButton("L +")
@@ -732,9 +904,13 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(btn_r_prev, 2, 2)
         controls_layout.addWidget(btn_r_next, 2, 3)
 
-        controls_layout.addWidget(btn_both_prev, 3, 2)
-        controls_layout.addWidget(btn_both_next, 3, 3)
-        controls_layout.addWidget(self.offset_label, 3, 0, 1, 2)
+        controls_layout.addWidget(QLabel("Jump:"), 3, 0)
+        controls_layout.addWidget(self.jump_edit, 3, 1)
+        controls_layout.addWidget(btn_jump, 3, 2)
+
+        controls_layout.addWidget(btn_both_prev, 4, 2)
+        controls_layout.addWidget(btn_both_next, 4, 3)
+        controls_layout.addWidget(self.offset_label, 4, 0, 1, 2)
 
         gen = QGroupBox("Generate script")
         right_layout.addWidget(gen)
@@ -870,7 +1046,10 @@ class MainWindow(QMainWindow):
             self.refresh_file_lists()
 
     def refresh_file_lists(self) -> None:
-        files = sorted(self.work_dir.glob("*.insv"))
+        files = sorted(
+            [p for p in self.work_dir.iterdir() if p.is_file() and p.suffix.lower() in {".insv", ".mov", ".mp4"}],
+            key=lambda p: p.name.lower(),
+        )
         names = [p.name for p in files]
         self.left_combo.clear()
         self.right_combo.clear()
@@ -881,7 +1060,7 @@ class MainWindow(QMainWindow):
             self.right_combo.setCurrentIndex(1)
             if not self.output_stem_edit.text().strip():
                 self.fill_output_name()
-        self.log_msg(f"Found {len(names)} INSV file(s) in {self.work_dir}")
+        self.log_msg(f"Found {len(names)} video file(s) (.insv/.mov/.mp4) in {self.work_dir}")
 
     def current_left_path(self) -> Path:
         return self.work_dir / self.left_combo.currentText()
@@ -894,20 +1073,16 @@ class MainWindow(QMainWindow):
             left = self.current_left_path()
             right = self.current_right_path()
             if not left.exists() or not right.exists():
-                raise ToolError("Please choose valid left/right INSV files.")
+                raise ToolError("Please choose valid left/right video files.")
             if left == right:
                 raise ToolError("Left and right files must be different.")
+
+            use_insv_pipeline = source_mode_for_pair(left, right) == "insv"
 
             self.left_info = ffprobe_video_info(left)
             self.right_info = ffprobe_video_info(right)
             fps = min(self.left_info.fps, self.right_info.fps) or DEFAULT_FPS
             self.fps_box.setValue(fps)
-
-            preview_dir = self.work_dir / ".maud_preview"
-            left_dir = preview_dir / f"{left.stem}__frames"
-            right_dir = preview_dir / f"{right.stem}__frames"
-
-            self.save_settings()
 
             preview_seconds = self.preview_seconds_box.value()
             preview_height = self.preview_height_box.value()
@@ -915,6 +1090,26 @@ class MainWindow(QMainWindow):
             right_fov = self.right_fov_box.value()
             left_yaw = self.left_yaw_box.value()
             right_yaw = self.right_yaw_box.value()
+
+            preview_dir = self.work_dir / ".maud_preview"
+            left_dir = preview_dir / build_preview_dir_name(
+                left,
+                preview_seconds,
+                preview_height,
+                left_fov,
+                left_yaw,
+                use_insv_pipeline,
+            )
+            right_dir = preview_dir / build_preview_dir_name(
+                right,
+                preview_seconds,
+                preview_height,
+                right_fov,
+                right_yaw,
+                use_insv_pipeline,
+            )
+
+            self.save_settings()
 
             self.log_msg(f"Building LEFT preview ({preview_seconds}s, h={preview_height}, fov={left_fov}, yaw={left_yaw}) …")
             self.left_preview = build_preview_frames(
@@ -924,6 +1119,7 @@ class MainWindow(QMainWindow):
                 fov=left_fov,
                 yaw=left_yaw,
                 preview_height=preview_height,
+                use_insv_pipeline=use_insv_pipeline,
             )
 
             self.log_msg(f"Building RIGHT preview ({preview_seconds}s, h={preview_height}, fov={right_fov}, yaw={right_yaw}) …")
@@ -934,6 +1130,7 @@ class MainWindow(QMainWindow):
                 fov=right_fov,
                 yaw=right_yaw,
                 preview_height=preview_height,
+                use_insv_pipeline=use_insv_pipeline,
             )
 
             self.left_frame_box.blockSignals(True)
@@ -974,6 +1171,36 @@ class MainWindow(QMainWindow):
     def bump_both(self, delta: int) -> None:
         self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), self.left_frame_box.value() + delta)))
         self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), self.right_frame_box.value() + delta)))
+
+    def parse_jump_value(self, text: str) -> int:
+        raw = text.strip()
+        if not raw:
+            raise ToolError("Jump is empty.")
+        if ":" in raw:
+            parts = raw.split(":")
+            if len(parts) == 2:
+                minutes = int(parts[0])
+                seconds = float(parts[1])
+                total_seconds = minutes * 60 + seconds
+            elif len(parts) == 3:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                seconds = float(parts[2])
+                total_seconds = hours * 3600 + minutes * 60 + seconds
+            else:
+                raise ToolError("Jump time must be sec, mm:ss or hh:mm:ss.")
+            return max(0, int(round(total_seconds * max(self.fps_box.value(), 0.001))))
+        if any(ch in raw for ch in ".eE"):
+            return max(0, int(round(float(raw) * max(self.fps_box.value(), 0.001))))
+        return max(0, int(raw))
+
+    def jump_to_position(self) -> None:
+        try:
+            frame_index = self.parse_jump_value(self.jump_edit.text())
+            self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), frame_index)))
+            self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), frame_index)))
+        except Exception as e:
+            self.show_error(e)
 
     def refresh_previews(self) -> None:
         try:
@@ -1058,6 +1285,7 @@ class MainWindow(QMainWindow):
                 fov_right=self.right_fov_box.value(),
                 yaw_left=self.left_yaw_box.value(),
                 yaw_right=self.right_yaw_box.value(),
+                use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
@@ -1114,6 +1342,7 @@ class MainWindow(QMainWindow):
                     yaw_right=self.right_yaw_box.value(),
                     left_preview_count=self.left_preview.frame_count,
                     right_preview_count=self.right_preview.frame_count,
+                    use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
                 )
             else:
                 text = build_fast_batch_image_dump_script_text(
@@ -1127,6 +1356,7 @@ class MainWindow(QMainWindow):
                     fov_right=self.right_fov_box.value(),
                     yaw_left=self.left_yaw_box.value(),
                     yaw_right=self.right_yaw_box.value(),
+                    use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
                 )
  
             script_path.write_text(text, encoding="utf-8")
@@ -1178,6 +1408,7 @@ class MainWindow(QMainWindow):
                 yaw_right=self.right_yaw_box.value(),
                 test_seconds=self.test_seconds_box.value(),
                 include_test_duration=self.use_test_duration_box.isChecked(),
+                use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
@@ -1200,4 +1431,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
