@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess, Qt
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -222,33 +222,35 @@ def build_preview_frames(
     out_dir.mkdir(parents=True, exist_ok=True)
     info = ffprobe_video_info(src, stream="v:0")
     fps = info.fps or DEFAULT_FPS
-    cache_meta_path = out_dir / "preview_meta.json"
-    expected_meta = preview_cache_metadata(src, preview_seconds, preview_height, fov, yaw, use_insv_pipeline)
+    cmd = build_preview_command(
+        src=src,
+        out_dir=out_dir,
+        preview_seconds=preview_seconds,
+        fov=fov,
+        yaw=yaw,
+        preview_height=preview_height,
+        use_insv_pipeline=use_insv_pipeline,
+    )
+    run_checked(cmd)
+    return finalize_preview_set(src, out_dir, fps)
 
-    try:
-        if cache_meta_path.exists():
-            cached_meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
-            first = out_dir / "frame_000001.jpg"
-            frame_count = count_preview_frames(out_dir)
-            if cached_meta == expected_meta and first.exists() and frame_count > 0:
-                frame_info = ffprobe_video_info(first)
-                return PreviewSet(
-                    dir_path=out_dir,
-                    fps=fps,
-                    frame_count=frame_count,
-                    width=frame_info.width,
-                    height=frame_info.height,
-                )
-    except Exception:
-        pass
 
-    for old in out_dir.glob("frame_*.jpg"):
-        old.unlink()
-
-    cmd = [
+def build_preview_command(
+    src: Path,
+    out_dir: Path,
+    preview_seconds: int,
+    fov: float,
+    yaw: float,
+    preview_height: int,
+    use_insv_pipeline: bool,
+) -> list[str]:
+    return [
         "ffmpeg",
         "-y",
         "-hide_banner",
+        "-nostats",
+        "-progress",
+        "pipe:1",
         "-t",
         str(preview_seconds),
         "-i",
@@ -268,8 +270,9 @@ def build_preview_frames(
         "-an",
         str(out_dir / "frame_%06d.jpg"),
     ]
-    run_checked(cmd)
 
+
+def finalize_preview_set(src: Path, out_dir: Path, fps: float) -> PreviewSet:
     first = out_dir / "frame_000001.jpg"
     if not first.exists():
         raise ToolError(f"Preview build created no frames for {src.name}")
@@ -801,6 +804,10 @@ class MainWindow(QMainWindow):
         self.right_info: Optional[VideoInfo] = None
         self.left_preview: Optional[PreviewSet] = None
         self.right_preview: Optional[PreviewSet] = None
+        self.preview_process: Optional[QProcess] = None
+        self.preview_queue: list[dict[str, object]] = []
+        self.current_preview_job: Optional[dict[str, object]] = None
+        self.preview_expected_frames = 0
 
         self._build_ui()
         self.load_settings()
@@ -836,6 +843,9 @@ class MainWindow(QMainWindow):
         btn_refresh.clicked.connect(self.refresh_file_lists)
         btn_build = QPushButton("Preview")
         btn_build.clicked.connect(self.build_previews)
+        self.btn_stop_preview = QPushButton("Stop")
+        self.btn_stop_preview.setEnabled(False)
+        self.btn_stop_preview.clicked.connect(self.stop_preview_build)
 
         pick_row.addWidget(QLabel("Left video:"), 0, 0)
         pick_row.addWidget(self.left_combo, 0, 1)
@@ -843,6 +853,7 @@ class MainWindow(QMainWindow):
         pick_row.addWidget(self.right_combo, 1, 1)
         pick_row.addWidget(btn_refresh, 0, 2)
         pick_row.addWidget(btn_build, 1, 2)
+        pick_row.addWidget(self.btn_stop_preview, 1, 3)
         pick_row.setColumnStretch(1, 1)
 
         preview_box = QGroupBox("Preview (Top/Bottom)")
@@ -870,6 +881,9 @@ class MainWindow(QMainWindow):
         self.right_image.setMinimumSize(720, 300)
         self.right_image.setStyleSheet("background:#111;color:#ddd;border:1px solid #555;")
         preview_layout.addWidget(self.right_image, 1)
+
+        self.preview_progress_label = QLabel("Preview progress: idle")
+        preview_layout.addWidget(self.preview_progress_label)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -1104,8 +1118,153 @@ class MainWindow(QMainWindow):
     def current_right_path(self) -> Path:
         return self.work_dir / self.right_combo.currentText()
 
+    def set_preview_progress(self, text: str) -> None:
+        self.preview_progress_label.setText(f"Preview progress: {text}")
+
+    def _cleanup_preview_process(self) -> None:
+        if self.preview_process is not None:
+            try:
+                self.preview_process.readyReadStandardOutput.disconnect(self.on_preview_process_output)
+            except Exception:
+                pass
+            try:
+                self.preview_process.readyReadStandardError.disconnect(self.on_preview_process_stderr)
+            except Exception:
+                pass
+            try:
+                self.preview_process.finished.disconnect(self.on_preview_process_finished)
+            except Exception:
+                pass
+            self.preview_process.deleteLater()
+        self.preview_process = None
+
+    def stop_preview_build(self) -> None:
+        self.preview_queue.clear()
+        self.current_preview_job = None
+        self.preview_expected_frames = 0
+        if self.preview_process is not None:
+            self.log_msg("Stopping preview build …")
+            self.preview_process.kill()
+        self._cleanup_preview_process()
+        self.btn_stop_preview.setEnabled(False)
+        self.set_preview_progress("stopped")
+
+    def on_preview_process_output(self) -> None:
+        if self.preview_process is None or self.current_preview_job is None:
+            return
+        text = bytes(self.preview_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("frame="):
+                continue
+            try:
+                frame = int(line.split("=", 1)[1])
+            except ValueError:
+                continue
+            side = str(self.current_preview_job["side"]).upper()
+            expected = max(1, self.preview_expected_frames)
+            shown = min(frame, expected)
+            self.set_preview_progress(f"{side} {shown}/{expected}")
+
+    def on_preview_process_stderr(self) -> None:
+        if self.preview_process is None:
+            return
+        _ = bytes(self.preview_process.readAllStandardError())
+
+    def start_next_preview_build(self) -> None:
+        if not self.preview_queue:
+            self.current_preview_job = None
+            self._cleanup_preview_process()
+            self.btn_stop_preview.setEnabled(False)
+            self.left_frame_box.setRange(0, max(0, self.left_preview.frame_count - 1) if self.left_preview else 0)
+            self.right_frame_box.setRange(0, max(0, self.right_preview.frame_count - 1) if self.right_preview else 0)
+            self.fill_output_name()
+            self.refresh_previews()
+            if self.left_preview and self.right_preview:
+                fps = min(self.left_preview.fps, self.right_preview.fps) or DEFAULT_FPS
+                self.set_preview_progress("done")
+                self.log_msg(
+                    f"Preview ready. Left frames: {self.left_preview.frame_count}, "
+                    f"Right frames: {self.right_preview.frame_count}, FPS: {fps:.6f}"
+                )
+            return
+
+        self.current_preview_job = self.preview_queue.pop(0)
+        side = str(self.current_preview_job["side"]).upper()
+        src = self.current_preview_job["src"]
+        preview_seconds = int(self.current_preview_job["preview_seconds"])
+        preview_height = int(self.current_preview_job["preview_height"])
+        fov = float(self.current_preview_job["fov"])
+        yaw = float(self.current_preview_job["yaw"])
+        fps = float(self.current_preview_job["fps"])
+        self.preview_expected_frames = max(1, int(round(fps * preview_seconds)))
+        self.set_preview_progress(f"{side} 0/{self.preview_expected_frames}")
+        self.log_msg(f"Building {side} preview ({preview_seconds}s, h={preview_height}, fov={fov}, yaw={yaw}) …")
+
+        process = QProcess(self)
+        process.setProgram("ffmpeg")
+        cmd = build_preview_command(
+            src=src,  # type: ignore[arg-type]
+            out_dir=self.current_preview_job["out_dir"],  # type: ignore[arg-type]
+            preview_seconds=preview_seconds,
+            fov=fov,
+            yaw=yaw,
+            preview_height=preview_height,
+            use_insv_pipeline=bool(self.current_preview_job["use_insv_pipeline"]),
+        )
+        process.setArguments(cmd[1:])
+        process.readyReadStandardOutput.connect(self.on_preview_process_output)
+        process.readyReadStandardError.connect(self.on_preview_process_stderr)
+        process.finished.connect(self.on_preview_process_finished)
+        self.preview_process = process
+        self.btn_stop_preview.setEnabled(True)
+        process.start()
+
+    def on_preview_process_finished(self, exit_code: int, exit_status) -> None:  # type: ignore[override]
+        if self.current_preview_job is None or self.preview_process is None:
+            self._cleanup_preview_process()
+            self.btn_stop_preview.setEnabled(False)
+            return
+
+        stderr = bytes(self.preview_process.readAllStandardError()).decode("utf-8", errors="replace")
+        if exit_code != 0:
+            err = ToolError(
+                f"Preview build failed for {self.current_preview_job['src']}\n\nstderr:\n{stderr}"
+            )
+            self._cleanup_preview_process()
+            self.btn_stop_preview.setEnabled(False)
+            self.preview_queue.clear()
+            self.current_preview_job = None
+            self.set_preview_progress("failed")
+            self.show_error(err)
+            return
+
+        try:
+            preview = finalize_preview_set(
+                self.current_preview_job["src"],  # type: ignore[arg-type]
+                self.current_preview_job["out_dir"],  # type: ignore[arg-type]
+                float(self.current_preview_job["fps"]),
+            )
+            if self.current_preview_job["side"] == "left":
+                self.left_preview = preview
+            else:
+                self.right_preview = preview
+        except Exception as e:
+            self._cleanup_preview_process()
+            self.btn_stop_preview.setEnabled(False)
+            self.preview_queue.clear()
+            self.current_preview_job = None
+            self.set_preview_progress("failed")
+            self.show_error(e)
+            return
+
+        self._cleanup_preview_process()
+        self.start_next_preview_build()
+
     def build_previews(self) -> None:
         try:
+            if self.preview_process is not None:
+                raise ToolError("Preview build already running. Stop it first if you want to restart.")
             left = self.current_left_path()
             right = self.current_right_path()
             if not left.exists() or not right.exists():
@@ -1126,48 +1285,8 @@ class MainWindow(QMainWindow):
             right_fov = self.right_fov_box.value()
             left_yaw = self.left_yaw_box.value()
             right_yaw = self.right_yaw_box.value()
-
-            preview_dir = self.work_dir / ".maud_preview"
-            left_dir = preview_dir / build_preview_dir_name(
-                left,
-                preview_seconds,
-                preview_height,
-                left_fov,
-                left_yaw,
-                use_insv_pipeline,
-            )
-            right_dir = preview_dir / build_preview_dir_name(
-                right,
-                preview_seconds,
-                preview_height,
-                right_fov,
-                right_yaw,
-                use_insv_pipeline,
-            )
-
-            self.save_settings()
-
-            self.log_msg(f"Building LEFT preview ({preview_seconds}s, h={preview_height}, fov={left_fov}, yaw={left_yaw}) …")
-            self.left_preview = build_preview_frames(
-                left,
-                left_dir,
-                preview_seconds=preview_seconds,
-                fov=left_fov,
-                yaw=left_yaw,
-                preview_height=preview_height,
-                use_insv_pipeline=use_insv_pipeline,
-            )
-
-            self.log_msg(f"Building RIGHT preview ({preview_seconds}s, h={preview_height}, fov={right_fov}, yaw={right_yaw}) …")
-            self.right_preview = build_preview_frames(
-                right,
-                right_dir,
-                preview_seconds=preview_seconds,
-                fov=right_fov,
-                yaw=right_yaw,
-                preview_height=preview_height,
-                use_insv_pipeline=use_insv_pipeline,
-            )
+            self.left_preview = None
+            self.right_preview = None
 
             self.left_frame_box.blockSignals(True)
             self.right_frame_box.blockSignals(True)
@@ -1175,16 +1294,34 @@ class MainWindow(QMainWindow):
             self.right_frame_box.setValue(0)
             self.left_frame_box.blockSignals(False)
             self.right_frame_box.blockSignals(False)
+            self.left_frame_box.setRange(0, 0)
+            self.right_frame_box.setRange(0, 0)
 
-            self.left_frame_box.setRange(0, max(0, self.left_preview.frame_count - 1))
-            self.right_frame_box.setRange(0, max(0, self.right_preview.frame_count - 1))
-
-            self.fill_output_name()
-            self.refresh_previews()
-            self.log_msg(
-                f"Preview ready. Left frames: {self.left_preview.frame_count}, "
-                f"Right frames: {self.right_preview.frame_count}, FPS: {fps:.6f}"
-            )
+            self.preview_queue = [
+                {
+                    "side": "left",
+                    "src": left,
+                    "out_dir": left_dir,
+                    "preview_seconds": preview_seconds,
+                    "preview_height": preview_height,
+                    "fov": left_fov,
+                    "yaw": left_yaw,
+                    "fps": fps,
+                    "use_insv_pipeline": use_insv_pipeline,
+                },
+                {
+                    "side": "right",
+                    "src": right,
+                    "out_dir": right_dir,
+                    "preview_seconds": preview_seconds,
+                    "preview_height": preview_height,
+                    "fov": right_fov,
+                    "yaw": right_yaw,
+                    "fps": fps,
+                    "use_insv_pipeline": use_insv_pipeline,
+                },
+            ]
+            self.start_next_preview_build()
         except Exception as e:
             self.show_error(e)
 
