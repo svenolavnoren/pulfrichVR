@@ -172,6 +172,44 @@ def count_preview_frames(directory: Path) -> int:
     return len(list(directory.glob("frame_*.jpg")))
 
 
+def preview_cache_tag(value: float) -> str:
+    return f"{value:.3f}".replace("-", "m").replace(".", "p")
+
+
+def build_preview_dir_name(
+    src: Path,
+    preview_seconds: int,
+    preview_height: int,
+    fov: float,
+    yaw: float,
+    use_insv_pipeline: bool,
+) -> str:
+    mode_tag = "insv" if use_insv_pipeline else "flat"
+    return (
+        f"{src.stem}__{mode_tag}__ps{preview_seconds}"
+        f"__h{preview_height}__fov{preview_cache_tag(fov)}__yaw{preview_cache_tag(yaw)}__frames"
+    )
+
+
+def preview_cache_metadata(
+    src: Path,
+    preview_seconds: int,
+    preview_height: int,
+    fov: float,
+    yaw: float,
+    use_insv_pipeline: bool,
+) -> dict[str, object]:
+    return {
+        "src_name": src.name,
+        "src_mtime_ns": src.stat().st_mtime_ns,
+        "preview_seconds": preview_seconds,
+        "preview_height": preview_height,
+        "fov": round(fov, 6),
+        "yaw": round(yaw, 6),
+        "use_insv_pipeline": use_insv_pipeline,
+    }
+
+
 def build_preview_frames(
     src: Path,
     out_dir: Path,
@@ -182,11 +220,30 @@ def build_preview_frames(
     use_insv_pipeline: bool,
 ) -> PreviewSet:
     out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("frame_*.jpg"):
-        old.unlink()
-
     info = ffprobe_video_info(src, stream="v:0")
     fps = info.fps or DEFAULT_FPS
+    cache_meta_path = out_dir / "preview_meta.json"
+    expected_meta = preview_cache_metadata(src, preview_seconds, preview_height, fov, yaw, use_insv_pipeline)
+
+    try:
+        if cache_meta_path.exists():
+            cached_meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
+            first = out_dir / "frame_000001.jpg"
+            frame_count = count_preview_frames(out_dir)
+            if cached_meta == expected_meta and first.exists() and frame_count > 0:
+                frame_info = ffprobe_video_info(first)
+                return PreviewSet(
+                    dir_path=out_dir,
+                    fps=fps,
+                    frame_count=frame_count,
+                    width=frame_info.width,
+                    height=frame_info.height,
+                )
+    except Exception:
+        pass
+
+    for old in out_dir.glob("frame_*.jpg"):
+        old.unlink()
 
     cmd = [
         "ffmpeg",
@@ -218,6 +275,7 @@ def build_preview_frames(
         raise ToolError(f"Preview build created no frames for {src.name}")
     frame_info = ffprobe_video_info(first)
     frame_count = count_preview_frames(out_dir)
+    cache_meta_path.write_text(json.dumps(expected_meta, indent=2), encoding="utf-8")
     return PreviewSet(
         dir_path=out_dir,
         fps=fps,
@@ -843,6 +901,11 @@ class MainWindow(QMainWindow):
         self.right_frame_box = QSpinBox()
         self.right_frame_box.setRange(0, 10_000_000)
         self.right_frame_box.valueChanged.connect(self.on_right_frame_changed)
+        self.jump_edit = QLineEdit()
+        self.jump_edit.setPlaceholderText("sec, frame, or mm:ss")
+        self.jump_edit.returnPressed.connect(self.jump_to_position)
+        btn_jump = QPushButton("Jump")
+        btn_jump.clicked.connect(self.jump_to_position)
 
         btn_l_prev = QPushButton("L -")
         btn_l_next = QPushButton("L +")
@@ -877,9 +940,13 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(btn_r_prev, 2, 2)
         controls_layout.addWidget(btn_r_next, 2, 3)
 
-        controls_layout.addWidget(btn_both_prev, 3, 2)
-        controls_layout.addWidget(btn_both_next, 3, 3)
-        controls_layout.addWidget(self.offset_label, 3, 0, 1, 2)
+        controls_layout.addWidget(QLabel("Jump:"), 3, 0)
+        controls_layout.addWidget(self.jump_edit, 3, 1)
+        controls_layout.addWidget(btn_jump, 3, 2)
+
+        controls_layout.addWidget(btn_both_prev, 4, 2)
+        controls_layout.addWidget(btn_both_next, 4, 3)
+        controls_layout.addWidget(self.offset_label, 4, 0, 1, 2)
 
         gen = QGroupBox("Generate script")
         right_layout.addWidget(gen)
@@ -1053,18 +1120,32 @@ class MainWindow(QMainWindow):
             fps = min(self.left_info.fps, self.right_info.fps) or DEFAULT_FPS
             self.fps_box.setValue(fps)
 
-            preview_dir = self.work_dir / ".maud_preview"
-            left_dir = preview_dir / f"{left.stem}__frames"
-            right_dir = preview_dir / f"{right.stem}__frames"
-
-            self.save_settings()
-
             preview_seconds = self.preview_seconds_box.value()
             preview_height = self.preview_height_box.value()
             left_fov = self.left_fov_box.value()
             right_fov = self.right_fov_box.value()
             left_yaw = self.left_yaw_box.value()
             right_yaw = self.right_yaw_box.value()
+
+            preview_dir = self.work_dir / ".maud_preview"
+            left_dir = preview_dir / build_preview_dir_name(
+                left,
+                preview_seconds,
+                preview_height,
+                left_fov,
+                left_yaw,
+                use_insv_pipeline,
+            )
+            right_dir = preview_dir / build_preview_dir_name(
+                right,
+                preview_seconds,
+                preview_height,
+                right_fov,
+                right_yaw,
+                use_insv_pipeline,
+            )
+
+            self.save_settings()
 
             self.log_msg(f"Building LEFT preview ({preview_seconds}s, h={preview_height}, fov={left_fov}, yaw={left_yaw}) …")
             self.left_preview = build_preview_frames(
@@ -1126,6 +1207,36 @@ class MainWindow(QMainWindow):
     def bump_both(self, delta: int) -> None:
         self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), self.left_frame_box.value() + delta)))
         self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), self.right_frame_box.value() + delta)))
+
+    def parse_jump_value(self, text: str) -> int:
+        raw = text.strip()
+        if not raw:
+            raise ToolError("Jump is empty.")
+        if ":" in raw:
+            parts = raw.split(":")
+            if len(parts) == 2:
+                minutes = int(parts[0])
+                seconds = float(parts[1])
+                total_seconds = minutes * 60 + seconds
+            elif len(parts) == 3:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                seconds = float(parts[2])
+                total_seconds = hours * 3600 + minutes * 60 + seconds
+            else:
+                raise ToolError("Jump time must be sec, mm:ss or hh:mm:ss.")
+            return max(0, int(round(total_seconds * max(self.fps_box.value(), 0.001))))
+        if any(ch in raw for ch in ".eE"):
+            return max(0, int(round(float(raw) * max(self.fps_box.value(), 0.001))))
+        return max(0, int(raw))
+
+    def jump_to_position(self) -> None:
+        try:
+            frame_index = self.parse_jump_value(self.jump_edit.text())
+            self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), frame_index)))
+            self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), frame_index)))
+        except Exception as e:
+            self.show_error(e)
 
     def refresh_previews(self) -> None:
         try:
