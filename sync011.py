@@ -350,6 +350,29 @@ def read_jpg_comment(path: Path) -> str:
     return run_checked(cmd).strip()
 
 
+def build_flat_tb_graph(
+    left_chain: str,
+    right_chain: str,
+    target_res: int,
+    use_rgb24: bool,
+) -> str:
+    left_filters = f"{left_chain},format=rgb24" if use_rgb24 else left_chain
+    right_filters = f"{right_chain},format=rgb24" if use_rgb24 else right_chain
+    return (
+        f"[0:v:0]{left_filters},split=3[lv0][lv12][lv3]; "
+        f"[1:v:0]{right_filters},split=3[rv0][rv12][rv3]; "
+        "[lv0]crop='iw/4':ih:0:0[lq0]; "
+        "[lv12]crop='iw/2':ih:'iw/4':0[lmid]; "
+        "[lv3]crop='iw/4':ih:'3*iw/4':0[lq3]; "
+        "[rv0]crop='iw/4':ih:0:0[rq0]; "
+        "[rv12]crop='iw/2':ih:'iw/4':0[rmid]; "
+        "[rv3]crop='iw/4':ih:'3*iw/4':0[rq3]; "
+        "[rq0][lmid][rq3]hstack=inputs=3[top]; "
+        "[lq0][rmid][lq3]hstack=inputs=3[bot]; "
+        f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+    )
+
+
 def build_image_script_text(
     left_file: Path,
     right_file: Path,
@@ -392,10 +415,11 @@ def build_image_script_text(
             f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
         )
     else:
-        filter_graph = (
-            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[lv]; "
-            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[rv]; "
-            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        filter_graph = build_flat_tb_graph(
+            left_chain=f"select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS",
+            right_chain=f"select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS",
+            target_res=target_res,
+            use_rgb24=True,
         )
 
     recipe_cmd = " ".join(
@@ -491,10 +515,11 @@ def build_fast_batch_image_dump_script_text(
             f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
         )
     else:
-        filter_graph = (
-            "[0:v:0]format=rgb24[lv]; "
-            "[1:v:0]format=rgb24[rv]; "
-            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        filter_graph = build_flat_tb_graph(
+            left_chain="null",
+            right_chain="null",
+            target_res=target_res,
+            use_rgb24=False,
         )
 
     lines = f'''#!/usr/bin/env bash
@@ -578,10 +603,11 @@ def build_batch_image_dump_script_text(
             f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
         )
     else:
-        filter_graph = (
-            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[lv]; "
-            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[rv]; "
-            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        filter_graph = build_flat_tb_graph(
+            left_chain="select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS",
+            right_chain="select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS",
+            target_res=target_res,
+            use_rgb24=True,
         )
 
     lines = f'''#!/usr/bin/env bash
@@ -688,11 +714,25 @@ def build_ffmpeg_script_text(
             f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
         )
     else:
-        video_graph = (
-            f"[0:v:0]{left_trim_v0}format=rgb24[lv]; "
-            f"[1:v:0]{right_trim_v0}format=rgb24[rv]; "
-            f"[lv][rv]vstack,scale={target_res}:{target_res}[v]"
+        video_graph = build_flat_tb_graph(
+            left_chain=f"{left_trim_v0}null".rstrip(","),
+            right_chain=f"{right_trim_v0}null".rstrip(","),
+            target_res=target_res,
+            use_rgb24=True,
         )
+
+    audio_filter = ""
+    audio_map = ""
+    if use_insv_pipeline:
+        audio_filter = (
+            f"[0:a]pan=mono|c0=c0{left_trim_a}[a0]; "
+            f"[1:a]pan=mono|c0=c0{right_trim_a}[a1]; "
+            "[a0][a1]join=inputs=2:channel_layout=stereo[a]"
+        )
+        audio_map = ' -map "[a]"'
+
+    filter_complex = video_graph if not audio_filter else f"{video_graph}; {audio_filter}"
+    audio_codec_block = '  -c:a aac -b:a 192k \\\n' if use_insv_pipeline else ""
 
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -740,14 +780,10 @@ ffmpeg -hide_banner \
 {duration_line}  -i "$LEFT_FILE" \
   -i "$RIGHT_FILE" \
   -filter_complex "\
-{video_graph}; \
-[0:a]pan=mono|c0=c0{left_trim_a}[a0]; \
-[1:a]pan=mono|c0=c0{right_trim_a}[a1]; \
-[a0][a1]join=inputs=2:channel_layout=stereo[a]" \
-  -map "[v]" -map "[a]" \
+{filter_complex}" \
+  -map "[v]"{audio_map} \
   -c:v libsvtav1 \
-  -c:a aac -b:a 192k \
-  -shortest \
+{audio_codec_block}  -shortest \
   "$OUT_MP4"
 '''
     return lines
