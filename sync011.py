@@ -1279,6 +1279,14 @@ class MainWindow(QMainWindow):
             fps = min(self.left_info.fps, self.right_info.fps) or DEFAULT_FPS
             self.fps_box.setValue(fps)
 
+            preview_dir = self.work_dir / ".maud_preview"
+            preview_targets = {
+                "left": preview_dir / f"{left.stem}__frames",
+                "right": preview_dir / f"{right.stem}__frames",
+            }
+
+            self.save_settings()
+
             preview_seconds = self.preview_seconds_box.value()
             preview_height = self.preview_height_box.value()
             left_fov = self.left_fov_box.value()
@@ -1301,7 +1309,7 @@ class MainWindow(QMainWindow):
                 {
                     "side": "left",
                     "src": left,
-                    "out_dir": left_dir,
+                    "out_dir": preview_targets["left"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
                     "fov": left_fov,
@@ -1312,7 +1320,7 @@ class MainWindow(QMainWindow):
                 {
                     "side": "right",
                     "src": right,
-                    "out_dir": right_dir,
+                    "out_dir": preview_targets["right"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
                     "fov": right_fov,
