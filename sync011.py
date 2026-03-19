@@ -112,6 +112,21 @@ class PreviewSet:
     frame_count: int
     width: int
     height: int
+    season_start_seconds: float
+
+    @property
+    def frame_step(self) -> int:
+        return 1
+
+    def absolute_frame_index(self, local_index: int) -> int:
+        season_start_frame = int(round(self.season_start_seconds * self.fps))
+        return season_start_frame + local_index * self.frame_step
+
+    def local_seconds(self, local_index: int) -> float:
+        return local_index / max(self.fps, 0.001)
+
+    def absolute_seconds(self, local_index: int) -> float:
+        return self.absolute_frame_index(local_index) / max(self.fps, 0.001)
 
     def frame_path(self, index_1based: int) -> Path:
         return self.dir_path / f"frame_{index_1based:06d}.jpg"
@@ -183,10 +198,12 @@ def build_preview_dir_name(
     fov: float,
     yaw: float,
     use_insv_pipeline: bool,
+    season_start_seconds: float,
 ) -> str:
     mode_tag = "insv" if use_insv_pipeline else "flat"
     return (
         f"{src.stem}__{mode_tag}__ps{preview_seconds}"
+        f"__ss{preview_cache_tag(season_start_seconds)}"
         f"__h{preview_height}__fov{preview_cache_tag(fov)}__yaw{preview_cache_tag(yaw)}__frames"
     )
 
@@ -198,6 +215,7 @@ def preview_cache_metadata(
     fov: float,
     yaw: float,
     use_insv_pipeline: bool,
+    season_start_seconds: float,
 ) -> dict[str, object]:
     return {
         "src_name": src.name,
@@ -207,6 +225,7 @@ def preview_cache_metadata(
         "fov": round(fov, 6),
         "yaw": round(yaw, 6),
         "use_insv_pipeline": use_insv_pipeline,
+        "season_start_seconds": round(season_start_seconds, 6),
     }
 
 
@@ -218,6 +237,7 @@ def build_preview_frames(
     yaw: float,
     preview_height: int,
     use_insv_pipeline: bool,
+    season_start_seconds: float,
 ) -> PreviewSet:
     out_dir.mkdir(parents=True, exist_ok=True)
     info = ffprobe_video_info(src, stream="v:0")
@@ -230,9 +250,10 @@ def build_preview_frames(
         yaw=yaw,
         preview_height=preview_height,
         use_insv_pipeline=use_insv_pipeline,
+        season_start_seconds=season_start_seconds,
     )
     run_checked(cmd)
-    return finalize_preview_set(src, out_dir, fps)
+    return finalize_preview_set(src, out_dir, fps, season_start_seconds)
 
 
 def build_preview_command(
@@ -243,6 +264,7 @@ def build_preview_command(
     yaw: float,
     preview_height: int,
     use_insv_pipeline: bool,
+    season_start_seconds: float,
 ) -> list[str]:
     return [
         "ffmpeg",
@@ -251,6 +273,8 @@ def build_preview_command(
         "-nostats",
         "-progress",
         "pipe:1",
+        "-ss",
+        f"{season_start_seconds:.6f}",
         "-t",
         str(preview_seconds),
         "-i",
@@ -272,7 +296,7 @@ def build_preview_command(
     ]
 
 
-def finalize_preview_set(src: Path, out_dir: Path, fps: float) -> PreviewSet:
+def finalize_preview_set(src: Path, out_dir: Path, fps: float, season_start_seconds: float) -> PreviewSet:
     first = out_dir / "frame_000001.jpg"
     if not first.exists():
         raise ToolError(f"Preview build created no frames for {src.name}")
@@ -284,6 +308,7 @@ def finalize_preview_set(src: Path, out_dir: Path, fps: float) -> PreviewSet:
         frame_count=frame_count,
         width=frame_info.width,
         height=frame_info.height,
+        season_start_seconds=season_start_seconds,
     )
 
 def qpixmap_from_file(path: Path) -> QPixmap:
@@ -487,6 +512,7 @@ def build_fast_batch_image_dump_script_text(
     right_file: Path,
     output_dir_name: str,
     stem: str,
+    season_start_seconds: float,
     preview_seconds: int,
     target_res: int,
     fov_left: float,
@@ -534,6 +560,7 @@ LEFT_FILE={shell_quote(left_file.name)}
 RIGHT_FILE={shell_quote(right_file.name)}
 OUT_DIR={shell_quote(output_dir_name)}
 STEM={shell_quote(stem)}
+SEASON_START_SECONDS={season_start_seconds:.6f}
 PREVIEW_SECONDS={preview_seconds}
 TARGET_RES={target_res}
 FOV_LEFT={fov_left}
@@ -543,7 +570,7 @@ YAW_RIGHT={yaw_right}
 
 mkdir -p "$OUT_DIR"
 
-ffmpeg -hide_banner -y -t "$PREVIEW_SECONDS" \
+ffmpeg -hide_banner -y -ss "$SEASON_START_SECONDS" -t "$PREVIEW_SECONDS" \
   -i "$LEFT_FILE" \
   -i "$RIGHT_FILE" \
   -filter_complex "\
@@ -559,6 +586,7 @@ def build_batch_image_dump_script_text(
     right_file: Path,
     output_dir_name: str,
     stem: str,
+    season_start_seconds: float,
     offset_frames: int,
     fps: float,
     src_left_width: int,
@@ -574,6 +602,7 @@ def build_batch_image_dump_script_text(
     right_preview_count: int,
     use_insv_pipeline: bool,
 ) -> str:
+    season_start_frame = int(round(season_start_seconds * fps))
     if offset_frames >= 0:
         left_start = 0
         right_start = offset_frames
@@ -625,6 +654,7 @@ STEM={shell_quote(stem)}
 PAIR_COUNT={pair_count}
 LEFT_START={left_start}
 RIGHT_START={right_start}
+SEASON_START_SECONDS={season_start_seconds:.6f}
 FPS_SYNC={fps:.6f}
 TARGET_RES={target_res}
 FOV_LEFT={fov_left}
@@ -634,9 +664,11 @@ YAW_RIGHT={yaw_right}
 
 mkdir -p "$OUT_DIR"
 
+SEASON_START_FRAME={season_start_frame}
+
 for ((i=0; i<PAIR_COUNT; i++)); do
-  LEFT_FRAME=$((LEFT_START + i))
-  RIGHT_FRAME=$((RIGHT_START + i))
+  LEFT_FRAME=$((SEASON_START_FRAME + LEFT_START + i))
+  RIGHT_FRAME=$((SEASON_START_FRAME + RIGHT_START + i))
   OUT_JPG=$(printf "%s/%s_%06d.jpg" "$OUT_DIR" "$STEM" "$i")
 
   ffmpeg -hide_banner -y \
@@ -883,6 +915,9 @@ class MainWindow(QMainWindow):
         self.preview_progress_label = QLabel("Preview progress: idle")
         preview_layout.addWidget(self.preview_progress_label)
 
+        self.preview_scope_label = QLabel("Season: 0.000 s")
+        preview_layout.addWidget(self.preview_scope_label)
+
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(4, 4, 4, 4)
@@ -914,10 +949,12 @@ class MainWindow(QMainWindow):
         self.right_frame_box.setRange(0, 10_000_000)
         self.right_frame_box.valueChanged.connect(self.on_right_frame_changed)
         self.jump_edit = QLineEdit()
-        self.jump_edit.setPlaceholderText("sec, frame, or mm:ss")
+        self.jump_edit.setPlaceholderText("season start: sec, frame, or mm:ss")
         self.jump_edit.returnPressed.connect(self.jump_to_position)
         btn_jump = QPushButton("Jump")
         btn_jump.clicked.connect(self.jump_to_position)
+        btn_prev_season = QPushButton("Season -")
+        btn_next_season = QPushButton("Season +")
 
         btn_l_prev = QPushButton("L -")
         btn_l_next = QPushButton("L +")
@@ -932,9 +969,12 @@ class MainWindow(QMainWindow):
         btn_r_next.clicked.connect(lambda: self.bump_frame("right", +self.step_spin.value()))
         btn_both_prev.clicked.connect(lambda: self.bump_both(-self.step_spin.value()))
         btn_both_next.clicked.connect(lambda: self.bump_both(+self.step_spin.value()))
+        btn_prev_season.clicked.connect(lambda: self.bump_season(-1))
+        btn_next_season.clicked.connect(lambda: self.bump_season(+1))
 
         self.offset_label = QLabel("Offset: 0 frames (0.000000 s)")
         self.offset_label.setStyleSheet("font-weight:bold;")
+        self.absolute_label = QLabel("Absolute frames: L 0, R 0")
 
         controls_layout.addWidget(QLabel("FPS:"), 0, 0)
         controls_layout.addWidget(self.fps_box, 0, 1)
@@ -955,10 +995,13 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(QLabel("Jump:"), 3, 0)
         controls_layout.addWidget(self.jump_edit, 3, 1)
         controls_layout.addWidget(btn_jump, 3, 2)
+        controls_layout.addWidget(btn_prev_season, 3, 3)
+        controls_layout.addWidget(btn_next_season, 3, 4)
 
         controls_layout.addWidget(btn_both_prev, 4, 2)
         controls_layout.addWidget(btn_both_next, 4, 3)
         controls_layout.addWidget(self.offset_label, 4, 0, 1, 2)
+        controls_layout.addWidget(self.absolute_label, 5, 0, 1, 5)
 
         gen = QGroupBox("Generate script")
         right_layout.addWidget(gen)
@@ -978,6 +1021,7 @@ class MainWindow(QMainWindow):
         self.right_yaw_box = QDoubleSpinBox(); self.right_yaw_box.setRange(-360.0, 360.0); self.right_yaw_box.setDecimals(3); self.right_yaw_box.setValue(DEFAULT_YAW_RIGHT); self.right_yaw_box.editingFinished.connect(self.save_settings)
         self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 300); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
         self.preview_height_box = QSpinBox(); self.preview_height_box.setRange(120, 2160); self.preview_height_box.setSingleStep(120); self.preview_height_box.setValue(DEFAULT_PREVIEW_HEIGHT); self.preview_height_box.editingFinished.connect(self.save_settings)
+        self.season_start_box = QDoubleSpinBox(); self.season_start_box.setRange(0.0, 24 * 3600.0); self.season_start_box.setDecimals(3); self.season_start_box.setSingleStep(1.0); self.season_start_box.setValue(0.0); self.season_start_box.editingFinished.connect(self.save_settings)
         self.test_seconds_box = QSpinBox(); self.test_seconds_box.setRange(1, 3600); self.test_seconds_box.setValue(DEFAULT_DURATION_TEST); self.test_seconds_box.editingFinished.connect(self.save_settings)
         self.use_test_duration_box = QCheckBox("Use -t TEST_SECONDS in generated script")
         self.use_test_duration_box.stateChanged.connect(self.save_settings)
@@ -1001,6 +1045,7 @@ class MainWindow(QMainWindow):
         gen_form.addRow("Right FOV:", self.right_fov_box)
         gen_form.addRow("Left yaw:", self.left_yaw_box)
         gen_form.addRow("Right yaw:", self.right_yaw_box)
+        gen_form.addRow("Season start (sec):", self.season_start_box)
         gen_form.addRow("Preview seconds:", self.preview_seconds_box)
         gen_form.addRow("Preview height:", self.preview_height_box)
         gen_form.addRow("Test seconds const:", self.test_seconds_box)
@@ -1054,6 +1099,7 @@ class MainWindow(QMainWindow):
             self.right_fov_box.setValue(float(data.get("right_fov", DEFAULT_FOV)))
             self.left_yaw_box.setValue(float(data.get("left_yaw", DEFAULT_YAW_LEFT)))
             self.right_yaw_box.setValue(float(data.get("right_yaw", DEFAULT_YAW_RIGHT)))
+            self.season_start_box.setValue(float(data.get("season_start_seconds", 0.0)))
             self.preview_seconds_box.setValue(int(data.get("preview_seconds", DEFAULT_PREVIEW_SECONDS)))
             self.preview_height_box.setValue(int(data.get("preview_height", DEFAULT_PREVIEW_HEIGHT)))
             self.test_seconds_box.setValue(int(data.get("test_seconds", DEFAULT_DURATION_TEST)))
@@ -1073,6 +1119,7 @@ class MainWindow(QMainWindow):
                 "right_fov": self.right_fov_box.value(),
                 "left_yaw": self.left_yaw_box.value(),
                 "right_yaw": self.right_yaw_box.value(),
+                "season_start_seconds": self.season_start_box.value(),
                 "preview_seconds": self.preview_seconds_box.value(),
                 "preview_height": self.preview_height_box.value(),
                 "test_seconds": self.test_seconds_box.value(),
@@ -1193,12 +1240,16 @@ class MainWindow(QMainWindow):
         src = self.current_preview_job["src"]
         preview_seconds = int(self.current_preview_job["preview_seconds"])
         preview_height = int(self.current_preview_job["preview_height"])
+        season_start_seconds = float(self.current_preview_job["season_start_seconds"])
         fov = float(self.current_preview_job["fov"])
         yaw = float(self.current_preview_job["yaw"])
         fps = float(self.current_preview_job["fps"])
         self.preview_expected_frames = max(1, int(round(fps * preview_seconds)))
         self.set_preview_progress(f"{side} 0/{self.preview_expected_frames}")
-        self.log_msg(f"Building {side} preview ({preview_seconds}s, h={preview_height}, fov={fov}, yaw={yaw}) …")
+        self.log_msg(
+            f"Building {side} preview (season_start={season_start_seconds:.3f}s, "
+            f"duration={preview_seconds}s, h={preview_height}, fov={fov}, yaw={yaw}) …"
+        )
 
         out_dir = self.current_preview_job["out_dir"]
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1214,6 +1265,7 @@ class MainWindow(QMainWindow):
             yaw=yaw,
             preview_height=preview_height,
             use_insv_pipeline=bool(self.current_preview_job["use_insv_pipeline"]),
+            season_start_seconds=season_start_seconds,
         )
         process.setArguments(cmd[1:])
         process.readyReadStandardOutput.connect(self.on_preview_process_output)
@@ -1247,6 +1299,7 @@ class MainWindow(QMainWindow):
                 self.current_preview_job["src"],  # type: ignore[arg-type]
                 self.current_preview_job["out_dir"],  # type: ignore[arg-type]
                 float(self.current_preview_job["fps"]),
+                float(self.current_preview_job["season_start_seconds"]),
             )
             if self.current_preview_job["side"] == "left":
                 self.left_preview = preview
@@ -1284,14 +1337,31 @@ class MainWindow(QMainWindow):
 
             preview_dir = self.work_dir / ".maud_preview"
             preview_targets = {
-                "left": preview_dir / f"{left.stem}__frames",
-                "right": preview_dir / f"{right.stem}__frames",
+                "left": preview_dir / build_preview_dir_name(
+                    left,
+                    self.preview_seconds_box.value(),
+                    self.preview_height_box.value(),
+                    self.left_fov_box.value(),
+                    self.left_yaw_box.value(),
+                    use_insv_pipeline,
+                    self.season_start_box.value(),
+                ),
+                "right": preview_dir / build_preview_dir_name(
+                    right,
+                    self.preview_seconds_box.value(),
+                    self.preview_height_box.value(),
+                    self.right_fov_box.value(),
+                    self.right_yaw_box.value(),
+                    use_insv_pipeline,
+                    self.season_start_box.value(),
+                ),
             }
 
             self.save_settings()
 
             preview_seconds = self.preview_seconds_box.value()
             preview_height = self.preview_height_box.value()
+            season_start_seconds = self.season_start_box.value()
             left_fov = self.left_fov_box.value()
             right_fov = self.right_fov_box.value()
             left_yaw = self.left_yaw_box.value()
@@ -1315,6 +1385,7 @@ class MainWindow(QMainWindow):
                     "out_dir": preview_targets["left"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
+                    "season_start_seconds": season_start_seconds,
                     "fov": left_fov,
                     "yaw": left_yaw,
                     "fps": fps,
@@ -1326,6 +1397,7 @@ class MainWindow(QMainWindow):
                     "out_dir": preview_targets["right"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
+                    "season_start_seconds": season_start_seconds,
                     "fov": right_fov,
                     "yaw": right_yaw,
                     "fps": fps,
@@ -1356,6 +1428,21 @@ class MainWindow(QMainWindow):
         self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), self.left_frame_box.value() + delta)))
         self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), self.right_frame_box.value() + delta)))
 
+    def bump_season(self, direction: int) -> None:
+        step = self.preview_seconds_box.value()
+        self.season_start_box.setValue(max(0.0, self.season_start_box.value() + direction * step))
+        self.save_settings()
+
+    def current_preview_set(self, side: str) -> Optional[PreviewSet]:
+        return self.left_preview if side == "left" else self.right_preview
+
+    def current_absolute_frame(self, side: str) -> int:
+        preview = self.current_preview_set(side)
+        local_index = self.left_frame_box.value() if side == "left" else self.right_frame_box.value()
+        if preview is not None:
+            return preview.absolute_frame_index(local_index)
+        return local_index
+
     def parse_jump_value(self, text: str) -> int:
         raw = text.strip()
         if not raw:
@@ -1381,8 +1468,11 @@ class MainWindow(QMainWindow):
     def jump_to_position(self) -> None:
         try:
             frame_index = self.parse_jump_value(self.jump_edit.text())
-            self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), frame_index)))
-            self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), frame_index)))
+            season_start_seconds = frame_index / max(self.fps_box.value(), 0.001)
+            self.season_start_box.setValue(season_start_seconds)
+            self.left_frame_box.setValue(0)
+            self.right_frame_box.setValue(0)
+            self.save_settings()
         except Exception as e:
             self.show_error(e)
 
@@ -1402,8 +1492,14 @@ class MainWindow(QMainWindow):
 
             left_pm = qpixmap_from_file(left_path)
             right_pm = qpixmap_from_file(right_path)
-            self.left_caption.setText(f"Left preview — frame {self.left_frame_box.value()} / {self.left_frame_box.maximum()}")
-            self.right_caption.setText(f"Right preview — frame {self.right_frame_box.value()} / {self.right_frame_box.maximum()}")
+            self.left_caption.setText(
+                f"Left preview — local {self.left_frame_box.value()} / {self.left_frame_box.maximum()} "
+                f"→ absolute frame {self.left_preview.absolute_frame_index(self.left_frame_box.value())}"
+            )
+            self.right_caption.setText(
+                f"Right preview — local {self.right_frame_box.value()} / {self.right_frame_box.maximum()} "
+                f"→ absolute frame {self.right_preview.absolute_frame_index(self.right_frame_box.value())}"
+            )
             self.left_image.setPixmap(left_pm.scaled(self.left_image.size(), Qt.KeepAspectRatio, Qt.FastTransformation))
             self.right_image.setPixmap(right_pm.scaled(self.right_image.size(), Qt.KeepAspectRatio, Qt.FastTransformation))
             self.update_offset_label()
@@ -1421,7 +1517,16 @@ class MainWindow(QMainWindow):
         offset = self.right_frame_box.value() - self.left_frame_box.value()
         seconds = offset / max(self.fps_box.value(), 0.001)
         side = "trim RIGHT" if offset >= 0 else "trim LEFT"
+        left_abs = self.current_absolute_frame("left")
+        right_abs = self.current_absolute_frame("right")
+        left_abs_sec = left_abs / max(self.fps_box.value(), 0.001)
+        right_abs_sec = right_abs / max(self.fps_box.value(), 0.001)
         self.offset_label.setText(f"Offset: {offset} frames ({seconds:.6f} s) → {side}")
+        self.absolute_label.setText(
+            f"Absolute frames: L {left_abs} ({left_abs_sec:.3f}s), "
+            f"R {right_abs} ({right_abs_sec:.3f}s)"
+        )
+        self.preview_scope_label.setText(f"Season: {self.season_start_box.value():.3f} s")
 
     def fill_output_name(self) -> None:
         try:
@@ -1457,8 +1562,8 @@ class MainWindow(QMainWindow):
                 left_file=left,
                 right_file=right,
                 output_jpg=jpg_name,
-                left_frame_index=self.left_frame_box.value(),
-                right_frame_index=self.right_frame_box.value(),
+                left_frame_index=self.current_absolute_frame("left"),
+                right_frame_index=self.current_absolute_frame("right"),
                 fps=self.fps_box.value(),
                 src_left_width=self.left_info.width,
                 src_left_height=self.left_info.height,
@@ -1513,6 +1618,7 @@ class MainWindow(QMainWindow):
                     right_file=right,
                     output_dir_name=out_dir_name,
                     stem=stem,
+                    season_start_seconds=self.season_start_box.value(),
                     offset_frames=self.right_frame_box.value() - self.left_frame_box.value(),
                     fps=self.fps_box.value(),
                     src_left_width=self.left_info.width,
@@ -1534,6 +1640,7 @@ class MainWindow(QMainWindow):
                     right_file=right,
                     output_dir_name=out_dir_name,
                     stem=stem,
+                    season_start_seconds=self.season_start_box.value(),
                     preview_seconds=self.preview_seconds_box.value(),
                     target_res=self.target_res_box.value(),
                     fov_left=self.left_fov_box.value(),
