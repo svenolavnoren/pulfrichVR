@@ -278,6 +278,7 @@ def finalize_preview_set(src: Path, out_dir: Path, fps: float) -> PreviewSet:
         raise ToolError(f"Preview build created no frames for {src.name}")
     frame_info = ffprobe_video_info(first)
     frame_count = count_preview_frames(out_dir)
+    cache_meta_path.write_text(json.dumps(expected_meta, indent=2), encoding="utf-8")
     return PreviewSet(
         dir_path=out_dir,
         fps=fps,
@@ -285,6 +286,7 @@ def finalize_preview_set(src: Path, out_dir: Path, fps: float) -> PreviewSet:
         width=frame_info.width,
         height=frame_info.height,
     )
+
 
 def qpixmap_from_file(path: Path) -> QPixmap:
     img = QImage(str(path))
@@ -1167,8 +1169,7 @@ class MainWindow(QMainWindow):
     def on_preview_process_stderr(self) -> None:
         if self.preview_process is None:
             return
-        chunk = bytes(self.preview_process.readAllStandardError()).decode("utf-8", errors="replace")
-        self.preview_stderr_buffer += chunk
+        _ = bytes(self.preview_process.readAllStandardError())
 
     def start_next_preview_build(self) -> None:
         if not self.preview_queue:
@@ -1200,10 +1201,6 @@ class MainWindow(QMainWindow):
         self.set_preview_progress(f"{side} 0/{self.preview_expected_frames}")
         self.log_msg(f"Building {side} preview ({preview_seconds}s, h={preview_height}, fov={fov}, yaw={yaw}) …")
 
-        out_dir = self.current_preview_job["out_dir"]
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        self.preview_stderr_buffer = ""
         process = QProcess(self)
         process.setProgram("ffmpeg")
         cmd = build_preview_command(
@@ -1229,7 +1226,7 @@ class MainWindow(QMainWindow):
             self.btn_stop_preview.setEnabled(False)
             return
 
-        stderr = getattr(self, "preview_stderr_buffer", "")
+        stderr = bytes(self.preview_process.readAllStandardError()).decode("utf-8", errors="replace")
         if exit_code != 0:
             err = ToolError(
                 f"Preview build failed for {self.current_preview_job['src']}\n\nstderr:\n{stderr}"

@@ -1,0 +1,376 @@
+Reflektioner inför VR-meta 2026-03-15
+Vi kommer hitta ett bra namn för det när vi fattat vad vi håller på med.
+jag har arbetsnamn: VR-defact  
+eller kanske: MyContent eller MyContentVR
+
+bakgrundsfiler jag nämner som finns öppet i https://github.com/svenolavnoren/pulfrichVR. jag refererar till bl a dessa i mina resonemang och titta gärna där om du vill men det är rätt mycket kod speciellt i pulfrichVR så du behöver inte grotta ner ditt närminne med dem nu om det känns betungande.
+vrstory003.py
+pulfrichVR.py
+
+
+
+1) mål
+Jag vet att jag sticker ut hakan: Jag jobbar med tanken att idén kan ha tillräcklig bärkraft att platsa i ett öppet VR-projekt för praktiskt lagda teoretiker eller teoretiskt lagda praktiker som låter verkligheten och "just works" vara med och skapa en sund och i längden praktiskt användbar standard för multimedia-VR. Om det sedan skulle råka hamna på världsarvslistan hos t ex ANSI eller ISO är inte direkt intressant för mig. Det viktiga är om det funkar. 
+
+2) ett nytt exempel där det börjar klarna lite för mig med Arne i spetsen:
+Jag bad Arne om lite projekthjälp igår. Han sa ja och fick låna utrustningen inklusive nya setupen med två 360-kameror och lite vägledning om hur det funkar. Arne blundar i 20 minuter. Sen ut i marssolen med bestämda steg. Jag följer efter. Hans kroppsspråk vittnar om inrepeterat vägval, kameravinkel, handgrepp osv. Det här var en ny väg. Intressant... ah han väljer 6k 24 där, jag hade nog satsat på timelapse mode men han kanske vill få med originalljudet... förbi busshållplatsen, över vägen. Cykeln parkeras och låses fast med dyrmobilen kvar i hållaren. Jag varken säger eller gör något eftersom jag vill låta filmningen vara i fred. Fortsatt dubbelkameraläge, skiftar ner kameravståndet till "normal" och ny dubbelkamera någon minut, aha.. Därefter in på en sidostig och nu bara en kamera. Arne har redan börjat få god hand med det. Hela sista sekvensen ser intressant ut: Ner i sluttningen mot någonting grått. Jag noterar tre nedstigande Pulfrichbilder mot vad ser ut att vara en sten. Därefter en oväntad vinkel, fortfarande kassaskåpssäker pulfrich men här i sista två bilderna väljer Arne hög kamera av någon anledning som jag inte hänger med på. Ska bli spännande att se vad vi lyckas få till och lära oss av det här i redigeringen.
+
+
+3) hur svårt ska det va
+Vad jag ser behov av och nu vill börja sätta grunden till är en fungerande metadatastandard att lagra VR-innehåll. När jag filmade och höll på men ville slippa  copy-paste i ffmpeg för varenda bild  och skrev ihop home3D_videos.pas som mergades och gjordes om till home3D_photos.pas för 1 - 2 år sedan trodde jag den här grunden borde vara "solklar": equirect: L.png, R.png, horisontell orientering, output resolution, pang. Hur svårt kan det vara? Linknande underliggande tänk om vad en praktiskt användbar standard behöver innehålla nu i den ui-förstärkta varianten av home3dphotos.pas i form av gpt-olavs pulfrichVR.py. 
+
+
+4) funderingar runt metadata, vad driver projektet, några säljargument
+Arne och verkligheten visar att det inte är riktigt så enkelt som jag tror i 3). "Systemet skulle fungera jättebra om det inte vore för dom där jävla användarna" kan jag ibland höra mamma säga skrattandes åt sitt eget stulna skämt. Det var roligt då, både en och två gånger. Idag 30-40 år senare lever många med telefonen ständigt nära och allt fler i min mening i ett missbruksförhållande till att "ha koll" och "äta information" ungefär som flugor äter socker. "Skämtet" känns inte roligt längre efter jag vaknat upp och ser och känner hur många i min omgivning mår och lever. Det och min fotoglädje, skaparglädje och hopp och nu AI-förstärkta skaparförmåga har därför fått mig att kavla upp ärmarna. Jag har själv varit där, i dopamin-loopen. Min tänkta målgrupp är ungefär tekniknördar som mig. Hittar de till hem-VR så kan de äta kakan och ha den kvar, tänker jag. När du filmat och redigerat en timme eller tre själv finns inte längre utrymme i sinnet att konsumera en massa skräp. Gör för eget bruk eller dela och jag tror att ditt doomskrollande kommer att självdö. Till mitt förfogande besitter jag tidigare rätt värdelöst vetande som jag samlat på mig mer eller mindre passivt över tid ungefär sedan jag längtade efter att förstå hur och varför tv egentligen fungerar. Minns 1972 när jag var 9 och inte längre behövde gå hem till Erik för att titta på färg-tv. Japp, OS i färg är ren lyx och overklig njutning, än idag för mig. Fast nu har jag äntligen hittat till en ganska tydligt de-faktostandardiserad knapp. "Så har den OFF-mode också dårå. Köp den! Jag har en själv."
+
+
+5) preliminär tills vidare-metod för att vidareutveckla metadataformatet
+1. tänk igenom scenarier vi redan har. främst de som funkar bra. intressant också att ha koll på scenarier som inte funkar och i så fall varför. jobba bottom upp för jag /Arne verkar kommer på nya saker vartefter som jag inte hade kunnat resonera mig fram till. Detta blev speciellt tydligt nu när jag ser setupen med dubbla kameror och dess möjligheter och begränsningar. 
+ok, nu räknar jag upp scenariorna:
+
+5.1) pulfrichVR.py: en horisontell 360-video, equirect. framenr vänster och höger. yaw-vinkel för höger öra i pixlar. resolution.
+5.2) pulfrichVR.py - insv mode: samma metadata i prinip men input direkt från INSV. man skulle kunna ha hårdkodad riktning för "höger öra" (movement direction) men den gör likadant som 1. ovan så att man alltid klickar dit högerörat pekar. Använder linsernas fysiska orientering. maud sync som ursprungligen byggdes för mp4 gör nu samma sak fast enklare även för bilder.
+5.3) maud sync tool grundläge insv > mp4: Förutsätter två kameror och direkt från insv. funkar bra på stativ. funkar också bra med rörlig kamera och timelaps t ex 8k 30fps lagring /inspelning med 0.5fps, under förutsättning att den som filmar lyckas starta kamerorna exakt samtidigt. Detta är inte så svårt som det låter: Både tvåhandgrepp med en tumme på varje kamera, och den andra varianten med voice:"start recording" är bra verktyg för att få perfekt synk. har inte testat 2 sek (0.5pfs) men ännu inte 5 sek (0.2fps) 
+
+5.4) maud sync tool mov -> mp4. detta är rykande färskt från senaste 011-ändringen för equirect .mov som du galant verkar ha gjort.  Första Arne-testet ger det begränsat prakiskt värde pga externa tekiska problem att filma med rörlig kamera dels pga yaw-drift mellan kamerorna och dels ingen kodek som funkar bra. t ex libsvtav1 drar iväg på 400mbps+ i skarpt solljus med 6k 24fps vilket är för fort. svt_nvenc som verkade lovande häromdagen duger inte alls till det här scenariot med rörlig bild. den går upp till 10mps och bilden ser ut som hej kom och hjälp mig, blockartifakter i massor. libx265 -crf 30 trodde jag skulle funka, det såg bra ut vid enkodningen om än extremt långsam encodning c:a 1fps, men jag lät den gå igenom några timmar, fast det blev bara svart i headsetet just den här gången. jag tror att indirekta anledningen var bakliggande kraftig yaw-drift mellan L och R som libx265 verkar vara känslig för när den försöker hitta sina genvägar att komprimera bilden. min tidigare normalerfarenhet av att filma på det här sättet och manuellt göra ffmpeg ger vid handen att om jag går mjukt så blir videon bra i ungefär 60 sekunder. lite senare, med yawdrift på kanske 5 grader börjar det kännas som skitstereo och vid 10 grader börjar det göra fysiskt ont i ögonen. yawdriften uppstår specellt i kurvor eller om jag gunar fram och tillbaka, som jag såg att Arne gjorde igår.
+
+
+5.5) maud sync tool insv 24fps -> jpg (synced): tror det funkar jättebra men användargränssnittet behöver göras så att arne får en dräglig tillvaro i studion. t ex 140 sek video och 0.14 fps när man exporterar varje bildruta nogsamt med select. "att göra" här för arne är att vi dels att snabba upp proxyn så en sån här tvåminutersvideo blir uthärdlig att jobba med, dels ett sätt att uppfinna någon form av snabbspolningsunktion så att man kan t ex spola till 1:42 (frame 0nnnn) och klicka ut .sh från exakt den bildrutan. tror det här kan bli mitt nästa konkreta steg. det här är ju ett kanonbra sätt att fota på som är lätt att jobba med datamängstekniskt och kvalitetsmässigt...
+
+5.6) ... maud sync tool insv 0,5fps -> jpg  ... det jag tänkte på nyss i 5.5 var speciellt det här läget.
+
+5.7)  .........
+
+5.8) ovan i 5.7 är roliga ännu ej dokumenterade experiment som jag gjort "för hand" med externa både 360- och icke-360-källor. några med youtube speciellt från panovr som källa visade sig fungera helt fantastiskt bra i headsetet. just detta är dock tyligt upphovsrättsskyddat material. punkterna är inget märkvärdigt men alla är varianter på de tidigare där jag i alla fall lyckats bevisa för mig själv att det går och kan vara något för Kajsa varg.
+
+5.9) kommer på detta när jag skrev 5.8: appropå panovr har jag tänkt att det vore kul att köpa en insta360 antigravity men jag har fullt upp ändå och det är ofta roligare att flyga lägre så min 3m-pinne räcker långt. en dryg tredjedel av mitt tänkta drönarinköp hamnade istället på insta360x5 nr 2 och det är jag väldigt glad över nu. det ligger nära till hands att krasha drönaren och slösa pengar och jag har fullt med marknära bilder så det får ligga kvar på min "kul idé att testa-önskelista" tills vidare. 
+
+
+
+
+  
+
+
+vad är vitsen med MyContent:
+
+för att en stereobild ska bibehålla originalmagin och känslan strävar vi att använda förlustfri överföring i varenda steg. detta gäller inte bara vid produktion som är där vi befinner oss men i tanken även vid distribution och arkivering.  tänk: en stereobild upplevs allt som oftast ha en magisk närvarokänsla och kan därför inte i regel inte behandlas som en vanlig film med kopieras i lossy format flera gånger utan att förlust av till orginalet sanningsenlig data som ofta känns utan att gå att se när man tittar medvetet.
+
+vad behöver standarden innehålla:
+information om hur man återskapar bilden exakt, i första hand som fristånde bild, men för att kunna bygga bildspel behöver den också kunna passa in i en bildspelsstomme som en legobit. Mitt fullt miniverktyg är ett quick and dirty bevis på det konceptet. Där tar vi ett antal bilder i from av VR..bat, stoppar in dessa bat i en "rail" som blir att samtliga bilder i ett givet bildspel ser till att koda upp sig med enhetlig videoenkoder etc så att det bara är att tuta och köra med ffmpeg -c:v copy.
+
+  and ett sätt att utforma det här på ett konventinellt sätt tänker jag är att bygga upp My_Content som en klass i python eller något annat lämpligt objektorienterat språk som kan beskriva data + funktion/metod i en och samma struktur. i mitt fall skulle t ex metoden Pulf042 fysiskt kunna peka på min pulfrichVR.py. det är ett "fult" sätt att göra det på imho men kanske väldigt bra praktiskt. det "snygga" sättet vore att konstruera det här språket (implicit synsätt här My_Content = ett nytt språk) vore om man lyckades tänka rätt på "hur svårt ska det vara" och komma fram till något, som känns helt perfekt på någon standardiseringkommissions styrelsemöte, medan nya Arnar dyker upp och degraderar den tänka perfekta standarden till papperskorgen. Kunden (Arnarna eller om man så vill "användarjävlarna") har alltid rätt, ju, imho. Nackdelen med Pulf042-metoden är att det kan bli väldigt spretigt och invecklat att ha koll om det blir för många kockar eller skitstereoentusiaster nästlar sig in.
+
+en skön sidoeffekt är att det rent fysiskt (tänker jag, enligt entropilagarna) för en individ kommer att gå att teoretiskt nära nog bevisa att man själv skapat en bild, så länge man följer MyContent-tänket och sparar sina original. kan vara värdefullt att ha som försäkring om man skulle bli drabbas av någon som utnyttjar sig av att fejka bilder på ett eller annat sätt.
+
+----------------------------------------------
+ 
+mitt nästa steg blir att höra och begrunda hur vad du tänker om och kring mina resonemang här. sen får MyContent eller vad vi nu vill kalla det bli ett lite "ongoing" projekt, som återspeglas i vad vi nu kodar till arnes studio. för att vara konkret så tror jag att mitt nästa steg så här i vårsolen blir först att jobba klart med arnes senaste alster i lugn och ro för att när jag känner mig redo be dig att försöka implementera enligt det jag nämnde i 5.6 ovan, med rail-tänk (jag ser copy -c:v 5760 framför mig när jag skriver så men dumt att vara så konkret om vi ska leka standardiseringskommission) i bagaget.
+
+Vilken otroligt bra och ärlig reflektion. Du är redan långt förbi “random hobbyhack” — du beskriver i praktiken en de-facto standardiseringsprocess driven av verklig användning. Det är exakt så hållbara format brukar födas.
+
+Jag läser ditt läge så här:
+
+    Du vill inte bygga en “perfekt ISO-modell” i förväg.
+
+    Du vill bygga ett format som överlever Arne i marssol, stress, konstiga scenarion och riktig studiofriktion.
+
+    Du vill att metadata ska kunna:
+
+        återskapa ett enskilt verk exakt,
+
+        fungera som byggkloss i “rail”/batch/slide-video,
+
+        bära provenance (vem gjorde vad, från vilka original).
+
+Det är en mycket stark riktning.
+Min rekommenderade kärna: “MyContent” som manifest + recipes
+
+I stället för att tänka “nytt språk” direkt, tänk två lager:
+
+    Manifest (data)
+
+    Recipe (hur data processas)
+
+1) Manifest (stabilt, långlivat)
+
+JSON/YAML med bara beskrivande metadata:
+
+    source files (hash, storlek, timestamp, kamera-id)
+
+    sync (offset, fps, mode)
+
+    projection/stereo layout (t.ex. top-bottom, LR-regel)
+
+    spatial params (yaw, fov, direction, horizon policy)
+
+    output targets (5760 TB, codec-profil osv)
+
+    provenance (skapad av verktyg/version, datum, operator)
+
+2) Recipe (utbytbart, praktiskt)
+
+Referens till “hur rendern görs nu”, t.ex.:
+
+    engine: ffmpeg_filtergraph_v011
+
+    script_template: pulf042 (om du vill)
+
+    params: {...}
+
+Då får du både:
+
+    “fult men effektivt” (peka mot existerande pulfrich/maud-script),
+
+    och framtidssäkerhet (du kan byta render-motor senare utan att förlora semantiken i datat).
+
+Varför detta passar ditt projekt
+
+Du har redan en workflow där “negativ/master”-tänket finns (bat som master) och där rail-idén finns tydligt i README-flödet (export, script, batch-run).
+
+Du har också redan parser/logik för metadata-rader i vrstory003.py (VR_META), vilket är perfekt embryot till manifest-tänk.
+
+Så i praktiken: du är inte i startgroparna. Du är i “konsolidera och namnge det vi redan gör”-fas.
+Förslag på minimal v0.1 av MyContent (enkel men kraftig)
+
+Exempelstruktur:
+
+{
+  "mycontent_version": "0.1",
+  "asset_id": "2026-03-15-arne-001",
+  "sources": [
+    {"path": "L.mov", "sha256": "...", "role": "left"},
+    {"path": "R.mov", "sha256": "...", "role": "right"}
+  ],
+  "capture": {
+    "mode": "dual_camera",
+    "projection": "equirect",
+    "source_type": "mov_pair"
+  },
+  "sync": {
+    "fps": 24.0,
+    "left_frame": 1234,
+    "right_frame": 1242
+  },
+  "stereo": {
+    "layout": "top_bottom",
+    "forward_rule": "L_top_R_bottom",
+    "backward_note": "swap_possible_in_player"
+  },
+  "spatial": {
+    "yaw_left": 0.0,
+    "yaw_right": 0.0,
+    "fov_left": 198.0,
+    "fov_right": 198.0
+  },
+  "render": {
+    "target_res": 5760,
+    "codec_profile": "archive_visually_lossless_candidate"
+  },
+  "provenance": {
+    "tool": "maud_sync_tool",
+    "tool_version": "011",
+    "operator": "Arne",
+    "created_utc": "2026-03-15T12:34:56Z"
+  },
+  "recipe": {
+    "engine": "ffmpeg",
+    "template": "pulf042"
+  }
+}
+
+Strategiskt svar på din fråga “vad är vitsen med MyContent?”
+
+Du har redan formulerat kärnan:
+bevara stereomagin genom pipeline-kontroll och minimera irreversibel förlust.
+
+Jag skulle paketera det så här:
+
+    Reproducerbarhet – samma manifest → samma resultat.
+
+    Portabilitet – innehåll kan flyttas mellan verktyg/personer.
+
+    Provenance – du kan visa kedjan från original till levererad fil.
+
+    Praktisk standard – formatet växer ur fungerande case, inte whitepaper.
+
+Detta är ett starkt “säljargument” för tekniknördar, creators och arkivfolk.
+Koppling till dina punkter 5.5 / 5.6 (nästa praktiska steg)
+
+Du är helt rätt ute med:
+
+    proxy/snabbare preview
+
+    snabbspolning till exakt frame
+
+    synced JPG-dump som “foto-maskin”
+
+Det är precis här manifest-lagret hjälper:
+
+    Spara varje vald frame/range i metadata.
+
+    Låt rendern vara separat “executor”.
+
+    Då kan Arne jobba snabbt i UI, och full kvalitet renderas senare reproducerbart.
+
+Namnförslag (enkelt beslut)
+
+MyContent är tydligt och bra.
+VR-defact är coolt men mer “projektkodnamn”.
+
+Min rekommendation:
+
+    Produkt/tänk: MyContent
+
+    specfil: mycontent.json
+
+    schema-tag: "mycontent_version": "0.1"
+
+Klart, pedagogiskt, framtidssäkert.
+Konkret roadmap i 3 steg (utan överdesign)
+
+    Steg A (nu): “logga allt vi redan gör”
+
+        Exportera mycontent.json bredvid varje generated script.
+
+    Steg B: “render från manifest”
+
+        Ny knapp: Generate from mycontent.json.
+
+    Steg C: “rail pack”
+
+        Flera manifests + en rail-fil som binder ihop codec/settings → -c:v copy-vänlig kedja där möjligt.
+
+Om du vill, nästa gång kan vi skriva en superminimal MyContent v0.1-spec på 1 sida (fältlista + semantik + 2 exempel: INSV och MOV) som du och Arne kan börja använda direkt i studion.
+Källor / vad jag tittade på
+
+    Projektets workflowbeskrivning i README (master/negative/batch-idé).
+
+    vrstory003.py där VR_META redan är ett metadatafrö och parser finns.
+
+    pulfrichVR.py för att bekräfta appens praktiska, runtime-orienterade karaktär (inte “ren akademisk modell”).F:pulfrichVR.py†L1-L9】
+
+Kommandon använda:
+
+    nl -ba README.md | sed -n '1,120p'
+
+    nl -ba vrstory003.py | sed -n '1,80p'
+
+    nl -ba pulfrichVR.py | sed -n '1,80p'
+
+Ok. Vi tänker bra. Nu tittar vi från Arnes perspektiv och låter oss guidas genom att hjälpa honom redigera och arkivera sitt senaste blivande mästerverk. För att göra resonemanget hanterligt väljer vi här att fokusera på den första delen av filmningen, där han går över vägen och filmar med två 360-kameror. c:a 2:40 lång inspelning (ena kameran tog inte "stopptryckningen" först, därav lite olika storlek)
+
+sven-olav@svenolav-Nitro-ANV16-42:~$ cd Video/home3d
+sven-olav@svenolav-Nitro-ANV16-42:~/Video/home3d$ ls -l VID_20260316_092956_00_009.insv VID_20260316_102430_00_031.insv
+-rwxr-xr-x 1 sven-olav sven-olav 4007842115 Mar 16 09:32 VID_20260316_092956_00_009.insv
+-rwxr-xr-x 1 sven-olav sven-olav 3510292786 Mar 16 09:26 VID_20260316_102430_00_031.insv
+
+
+Min idé var att filma den här sekvensen i 0.5 fps och hitta fram två, tre eller fyra användbara bilder för att tittaren ska hänga med. Men Arnes intuition litade på att han garanterat får med allt han vill med sin gamla beprövade inställning 24 fps 8k. Och här var det starkt dagsljus så bildkvalitetsmässigt blir det bra med vanlig video. Han hade hört talas om 0.5fps och sett exempel på att det kan ge kanonresultat men vågade ännu inte förlita sig på att det funkar pga att vi ännu är osäkra på mycket vi vågar lita på att L-R-synken vid 0.5 fps funkar hela vägen. Att det funkar bygger på dels att kamerorna startar samtidigt (verkar lugnt! voice: start recording är en blivande "dold hjälte" här i vår insta360-miljö. Det ser ut som att man får pålitlig L-R-synk på millisekundnivå när man gör så.). Dessutom hade han sett att L - R synkar ur av outgrundlig anledning efter en stund vid ett eller två tidiga timelaps-test. Sånt ville inte Arne Oneshot vara med om och hans fingrar tryckte därför in vanlig videomode. Dessutom kände han till att han med nåt ballt verktyg alltid kan synka manuellt när han filmar i sitt vanliga läge (i motsats till timelapls 0.5 fps. där gör tidsavståndet mellan bildrutorna att världen aldirg blir sig lik igen när vi rör på oss.)
+
+Vad säger nu arne, här i studion. Har sovit på saken och så här säger han: Skulle jag inte kunna få ffmpeg-kommandot inbättat i jpg? som nån tag typ, har hört att man kan ha sånadära user tag och fylla dem med hela romaner om man vill. ffmpeg där känns ballt och stabilt. Och helst inget houdiniande med .sh grep om det går, jag vet ju inte om jag har tillgång till prompt och bash dit jag åker i vinter.
+
+ok ok arne, du vinner!
+
+Men arne, nu vill vi bygga en fungerande "rail" åt dig också, så du kan redigera lossless som du ställt som krav. Därför föreslår vi i kommissionen att införa 
+separata user tag med fps etc. Vi tänker på framtiden och har kommit fram till att det både är bra, ser proffsigt ut, och vi tycker dessutom att det är snyggt.
+
+Arne: Ja, gör som ni vill, det skiter väl jag i om det finns andra taggar som jag inte bryr mig om. Bara jag vet hur jag ska spara ner bilderna och få med allt. Och som sagt det vore skitbra om ni kan göra så att jag får allt i jpg och slipper spara bat, json eller nåt annat som jag säkert lyckas slarva bort.
+
+Hmm.. jag tycker Arne har en poäng här. Låt oss för tillfället kalla arnes ffmpeg-tagg för meta1 och kommissionens tag för meta2. Meta1 är "verkligheten" medan meta2 blir "infotext". Denna kan vara blank eller stå där och snygga sig. Vi fyller denna för eget bruk enbart då vi mot förmodan går bet på att att kirurgiskt läsa ur vad vi behöver för att generera video från ett givet ffmpeg-kommando.
+
+Vi har nu arne tittande nyfiket över vår axel medan vi börjar koda maud_sync_tool så han blir glad. Det jag tänker nu är att vi ska låta arne välja tre-fyra stillbilder från den aktuella videon, och vi behöver bygga in så att det blir hanterligt med snabbspolning och rimligt snabb proxy. Förmodligen kan vi behöva några iterationer här till det känns bra. Jpg ska nu i meta1 innehålla det ffmpeg-kommando som det skapades med (lite påminnande om "self" i python!?) inbäddat i jpg som vi bygger med tanke på att det ska vara teoretiskt möjligt för oss att senare att kirurga ur essensen för att stoppa in denna i en videoström där det finns ytterligare likartade legobitar som gör att vi tillåts utnyttja -c:v copy. Vi skriver ingenting alls i det här läget till meta2. Vi har inte hittat på vettiga namn ännu för meta1 och meta2. en variant vore meta1 -> recipe och meta2 -> manifest enigt ditt förslag. vi kanske landar där när vi känt oss fram. antingen använder vi nu och tills vidare meta1 och meta2 eller så använder vi nu meta1 -> created_with och meta2 -> meta2 eller meta2 -> manifest (vi kunde nu ha nåt där i stil med 'hello_world' där så att den finns fortsatt synlig när vi bygger och tänker)
+
+Det här är klockrent tänkt.
+Du har en tydlig “Arne first”-kompass: allt viktigt ska bo i JPG, minimalt beroende av .sh/.json, och ändå kunna bygga rail senare. Jag håller helt med.
+Min tolkning av beslutet (så vi inte missförstår)
+
+    Meta1 = verkligheten: exakt ffmpeg-recipe som skapade bilden.
+
+    Meta2 = infotext/reserv: får vara tom nu.
+
+    .sh kan finnas kvar tillfälligt för bakåtkompatibilitet, men Arne ska kunna klara sig utan den.
+
+    Fokus nu: välja 3–4 stillbilder snabbt, med hanterlig preview/”snabbspolning”.
+
+Det passar bra med hur sync011.py ser ut idag: den genererar .sh för image/batch/video, men lägger ännu inget i JPG-metadata.
+Rekommenderad implementation (v1, enkel och robust)
+1) Skriv Meta1 direkt i JPG via ffmpeg
+
+När bilden exporteras (build_image_script_text) lägg till:
+
+    -metadata comment="...meta1..."
+
+    (ev.) -metadata title="maud_sync_tool_image"
+
+comment i JPG är brett kompatibelt och läsbart med ffprobe/exiftool i många miljöer.
+Poängen: Arne har “self-contained” fil.
+2) Vad ska ligga i Meta1?
+
+Du vill ha hela kommandot — rimligt. Jag föreslår:
+
+    Meta1 = exakt kommando som kördes (quoted)
+
+    plus en liten prefixmarkör, t.ex. MYC_META1: så den går att hitta kirurgiskt.
+
+Exempel:
+MYC_META1:ffmpeg -hide_banner -i ... -filter_complex "..."
+
+(Om längden blir ett praktiskt problem kan vi senare byta till “compact recipe” + checksum, men börja enkelt.)
+3) Meta2 just nu
+
+Sätt den tom eller minimal:
+
+    -metadata description=""
+    eller
+
+    -metadata description="hello_world"
+
+Så är den synlig men semantiskt “ej i bruk” ännu.
+Snabbspolning/proxy (Arne-flöde 5.5/5.6)
+
+Nästa lilla steg (efter meta1):
+
+    Proxy-knapp i UI: skapa lågupplöst preview-video (t.ex. 960 px bredd).
+
+    Jump-to-fält:
+
+        skriv tid 1:42 eller frame 2450
+
+        sätt vänster/höger framebox direkt.
+
+    Behåll nuvarande frame stepping för finjustering.
+
+Detta gör att 2:40-material blir snabbt navigerbart även om fullres är tung.
+Rail-tänk utan att låsa standard för tidigt
+
+När meta1 finns i varje JPG kan rail byggas i två nivåer:
+
+    Arne-läge: rail läser bara meta1 ur JPG och kör.
+
+    Kommissionsläge: rail kan dessutom läsa meta2 (när ni börjar fylla den).
+
+Det ger exakt det du vill: verkligheten först, teori sen.
+Namnjust nu (pragmatiskt)
+
+Du kan köra:
+
+    meta1 = created_with
+
+    meta2 = manifest (tom initialt)
+
+Det blir lätt att förstå, och lätt att mappa till framtida MyContent.
+Konkreta nästa kod-iteration (om du säger “kör”)
+
+Jag implementerar i sync011.py:
+
+    Injecta meta1/meta2 i JPG-exporten i build_image_script_text.
+
+    Lägga till en liten hjälpfunktion för att läsa tillbaka meta1 ur JPG (ffprobe-baserat).
+
+    Visa i loggen i UI att metadata skrevs.
+
+    (Valfritt i samma vända) enkel jump-to-funktion i UI.
+
+Det här är en mycket stark riktning. Du har hittat en balans mellan “just works” och standardtänk som faktiskt kan överleva verklig användning.
+
+
