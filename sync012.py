@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-# sync010.py
+# sync012.py
 # Copyright 2026 Sven-Olav Norén
 # Licensed under the Apache License, Version 2.0
 # SPDX-License-Identifier: Apache-2.0
