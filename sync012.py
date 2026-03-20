@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QSlider,
     QSpinBox,
     QDoubleSpinBox,
     QVBoxLayout,
@@ -76,7 +77,7 @@ DEFAULT_YAW_LEFT = 0.0
 DEFAULT_YAW_RIGHT = 0.0
 DEFAULT_OUTPUT_PREFIX = ""
 DEFAULT_DURATION_TEST = 20
-DEFAULT_PREVIEW_SECONDS = 10
+DEFAULT_PREVIEW_SECONDS = 2
 DEFAULT_PREVIEW_HEIGHT = 720
 
 
@@ -344,6 +345,11 @@ def infer_output_stem(left_path: Path, right_path: Path, prefix: str = DEFAULT_O
     else:
         parts.append(f"{left_path.stem}-{right_path.stem}")
     return "-".join(parts)
+
+
+def with_left_frame_suffix(stem: str, left_frame: int) -> str:
+    base = re.sub(r"__L\d+$", "", stem)
+    return f"{base}__L{left_frame:06d}"
 
 
 def shell_quote(path: str) -> str:
@@ -915,7 +921,7 @@ class MainWindow(QMainWindow):
         self.preview_progress_label = QLabel("Preview progress: idle")
         preview_layout.addWidget(self.preview_progress_label)
 
-        self.preview_scope_label = QLabel("Season: 0.000 s")
+        self.preview_scope_label = QLabel("Window start: 0.000 s")
         preview_layout.addWidget(self.preview_scope_label)
 
         right_panel = QWidget()
@@ -948,14 +954,6 @@ class MainWindow(QMainWindow):
         self.right_frame_box = QSpinBox()
         self.right_frame_box.setRange(0, 10_000_000)
         self.right_frame_box.valueChanged.connect(self.on_right_frame_changed)
-        self.jump_edit = QLineEdit()
-        self.jump_edit.setPlaceholderText("season start: sec, frame, or mm:ss")
-        self.jump_edit.returnPressed.connect(self.jump_to_position)
-        btn_jump = QPushButton("Jump")
-        btn_jump.clicked.connect(self.jump_to_position)
-        btn_prev_season = QPushButton("Season -")
-        btn_next_season = QPushButton("Season +")
-
         btn_l_prev = QPushButton("L -")
         btn_l_next = QPushButton("L +")
         btn_r_prev = QPushButton("R -")
@@ -969,12 +967,14 @@ class MainWindow(QMainWindow):
         btn_r_next.clicked.connect(lambda: self.bump_frame("right", +self.step_spin.value()))
         btn_both_prev.clicked.connect(lambda: self.bump_both(-self.step_spin.value()))
         btn_both_next.clicked.connect(lambda: self.bump_both(+self.step_spin.value()))
-        btn_prev_season.clicked.connect(lambda: self.bump_season(-1))
-        btn_next_season.clicked.connect(lambda: self.bump_season(+1))
 
         self.offset_label = QLabel("Offset: 0 frames (0.000000 s)")
         self.offset_label.setStyleSheet("font-weight:bold;")
         self.absolute_label = QLabel("Absolute frames: L 0, R 0")
+        self.window_slider = QSlider(Qt.Horizontal)
+        self.window_slider.setRange(0, 0)
+        self.window_slider.valueChanged.connect(self.on_window_slider_changed)
+        self.window_slider_label = QLabel("Window frame: 0 / 0")
 
         controls_layout.addWidget(QLabel("FPS:"), 0, 0)
         controls_layout.addWidget(self.fps_box, 0, 1)
@@ -992,16 +992,14 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(btn_r_prev, 2, 2)
         controls_layout.addWidget(btn_r_next, 2, 3)
 
-        controls_layout.addWidget(QLabel("Jump:"), 3, 0)
-        controls_layout.addWidget(self.jump_edit, 3, 1)
-        controls_layout.addWidget(btn_jump, 3, 2)
-        controls_layout.addWidget(btn_prev_season, 3, 3)
-        controls_layout.addWidget(btn_next_season, 3, 4)
+        controls_layout.addWidget(self.window_slider_label, 3, 0, 1, 5)
 
-        controls_layout.addWidget(btn_both_prev, 4, 2)
-        controls_layout.addWidget(btn_both_next, 4, 3)
-        controls_layout.addWidget(self.offset_label, 4, 0, 1, 2)
-        controls_layout.addWidget(self.absolute_label, 5, 0, 1, 5)
+        controls_layout.addWidget(QLabel("Slide:"), 4, 0)
+        controls_layout.addWidget(self.window_slider, 4, 1, 1, 4)
+        controls_layout.addWidget(btn_both_prev, 5, 2)
+        controls_layout.addWidget(btn_both_next, 5, 3)
+        controls_layout.addWidget(self.offset_label, 5, 0, 1, 2)
+        controls_layout.addWidget(self.absolute_label, 6, 0, 1, 5)
 
         gen = QGroupBox("Generate script")
         right_layout.addWidget(gen)
@@ -1019,7 +1017,7 @@ class MainWindow(QMainWindow):
         self.right_fov_box = QDoubleSpinBox(); self.right_fov_box.setRange(1.0, 360.0); self.right_fov_box.setDecimals(3); self.right_fov_box.setValue(DEFAULT_FOV); self.right_fov_box.editingFinished.connect(self.save_settings)
         self.left_yaw_box = QDoubleSpinBox(); self.left_yaw_box.setRange(-360.0, 360.0); self.left_yaw_box.setDecimals(3); self.left_yaw_box.setValue(DEFAULT_YAW_LEFT); self.left_yaw_box.editingFinished.connect(self.save_settings)
         self.right_yaw_box = QDoubleSpinBox(); self.right_yaw_box.setRange(-360.0, 360.0); self.right_yaw_box.setDecimals(3); self.right_yaw_box.setValue(DEFAULT_YAW_RIGHT); self.right_yaw_box.editingFinished.connect(self.save_settings)
-        self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 300); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
+        self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 10000); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
         self.preview_height_box = QSpinBox(); self.preview_height_box.setRange(120, 2160); self.preview_height_box.setSingleStep(120); self.preview_height_box.setValue(DEFAULT_PREVIEW_HEIGHT); self.preview_height_box.editingFinished.connect(self.save_settings)
         self.season_start_box = QDoubleSpinBox(); self.season_start_box.setRange(0.0, 24 * 3600.0); self.season_start_box.setDecimals(3); self.season_start_box.setSingleStep(1.0); self.season_start_box.setValue(0.0); self.season_start_box.editingFinished.connect(self.save_settings)
         self.test_seconds_box = QSpinBox(); self.test_seconds_box.setRange(1, 3600); self.test_seconds_box.setValue(DEFAULT_DURATION_TEST); self.test_seconds_box.editingFinished.connect(self.save_settings)
@@ -1045,7 +1043,7 @@ class MainWindow(QMainWindow):
         gen_form.addRow("Right FOV:", self.right_fov_box)
         gen_form.addRow("Left yaw:", self.left_yaw_box)
         gen_form.addRow("Right yaw:", self.right_yaw_box)
-        gen_form.addRow("Season start (sec):", self.season_start_box)
+        gen_form.addRow("Window start (sec):", self.season_start_box)
         gen_form.addRow("Preview seconds:", self.preview_seconds_box)
         gen_form.addRow("Preview height:", self.preview_height_box)
         gen_form.addRow("Test seconds const:", self.test_seconds_box)
@@ -1224,6 +1222,10 @@ class MainWindow(QMainWindow):
             self.btn_stop_preview.setEnabled(False)
             self.left_frame_box.setRange(0, max(0, self.left_preview.frame_count - 1) if self.left_preview else 0)
             self.right_frame_box.setRange(0, max(0, self.right_preview.frame_count - 1) if self.right_preview else 0)
+            self.window_slider.blockSignals(True)
+            self.window_slider.setRange(0, max(0, self.left_preview.frame_count - 1) if self.left_preview else 0)
+            self.window_slider.setValue(0)
+            self.window_slider.blockSignals(False)
             self.fill_output_name()
             self.refresh_previews()
             if self.left_preview and self.right_preview:
@@ -1377,6 +1379,10 @@ class MainWindow(QMainWindow):
             self.right_frame_box.blockSignals(False)
             self.left_frame_box.setRange(0, 0)
             self.right_frame_box.setRange(0, 0)
+            self.window_slider.blockSignals(True)
+            self.window_slider.setRange(0, 0)
+            self.window_slider.setValue(0)
+            self.window_slider.blockSignals(False)
 
             self.preview_queue = [
                 {
@@ -1409,10 +1415,22 @@ class MainWindow(QMainWindow):
             self.show_error(e)
 
     def on_left_frame_changed(self, value: int) -> None:
+        self.window_slider.blockSignals(True)
+        self.window_slider.setValue(value)
+        self.window_slider.blockSignals(False)
         self.refresh_previews()
 
     def on_right_frame_changed(self, value: int) -> None:
         self.refresh_previews()
+
+    def on_window_slider_changed(self, value: int) -> None:
+        current_left = self.left_frame_box.value()
+        current_right = self.right_frame_box.value()
+        delta = value - current_left
+        self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), value)))
+        self.right_frame_box.setValue(
+            max(0, min(self.right_frame_box.maximum(), current_right + delta))
+        )
 
     def bump_frame(self, side: str, delta: int) -> None:
         if side == "left":
@@ -1428,11 +1446,6 @@ class MainWindow(QMainWindow):
         self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), self.left_frame_box.value() + delta)))
         self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), self.right_frame_box.value() + delta)))
 
-    def bump_season(self, direction: int) -> None:
-        step = self.preview_seconds_box.value()
-        self.season_start_box.setValue(max(0.0, self.season_start_box.value() + direction * step))
-        self.save_settings()
-
     def current_preview_set(self, side: str) -> Optional[PreviewSet]:
         return self.left_preview if side == "left" else self.right_preview
 
@@ -1442,39 +1455,6 @@ class MainWindow(QMainWindow):
         if preview is not None:
             return preview.absolute_frame_index(local_index)
         return local_index
-
-    def parse_jump_value(self, text: str) -> int:
-        raw = text.strip()
-        if not raw:
-            raise ToolError("Jump is empty.")
-        if ":" in raw:
-            parts = raw.split(":")
-            if len(parts) == 2:
-                minutes = int(parts[0])
-                seconds = float(parts[1])
-                total_seconds = minutes * 60 + seconds
-            elif len(parts) == 3:
-                hours = int(parts[0])
-                minutes = int(parts[1])
-                seconds = float(parts[2])
-                total_seconds = hours * 3600 + minutes * 60 + seconds
-            else:
-                raise ToolError("Jump time must be sec, mm:ss or hh:mm:ss.")
-            return max(0, int(round(total_seconds * max(self.fps_box.value(), 0.001))))
-        if any(ch in raw for ch in ".eE"):
-            return max(0, int(round(float(raw) * max(self.fps_box.value(), 0.001))))
-        return max(0, int(raw))
-
-    def jump_to_position(self) -> None:
-        try:
-            frame_index = self.parse_jump_value(self.jump_edit.text())
-            season_start_seconds = frame_index / max(self.fps_box.value(), 0.001)
-            self.season_start_box.setValue(season_start_seconds)
-            self.left_frame_box.setValue(0)
-            self.right_frame_box.setValue(0)
-            self.save_settings()
-        except Exception as e:
-            self.show_error(e)
 
     def refresh_previews(self) -> None:
         try:
@@ -1526,13 +1506,19 @@ class MainWindow(QMainWindow):
             f"Absolute frames: L {left_abs} ({left_abs_sec:.3f}s), "
             f"R {right_abs} ({right_abs_sec:.3f}s)"
         )
-        self.preview_scope_label.setText(f"Season: {self.season_start_box.value():.3f} s")
+        self.preview_scope_label.setText(f"Window start: {self.season_start_box.value():.3f} s")
+        self.window_slider_label.setText(
+            f"Window frame: {self.left_frame_box.value()} / {self.left_frame_box.maximum()}"
+        )
 
     def fill_output_name(self) -> None:
         try:
             left = self.current_left_path()
             right = self.current_right_path()
-            self.output_stem_edit.setText(infer_output_stem(left, right))
+            stem = infer_output_stem(left, right)
+            if self.left_preview is not None:
+                stem = with_left_frame_suffix(stem, self.current_absolute_frame("left"))
+            self.output_stem_edit.setText(stem)
             self.save_settings()
         except Exception:
             pass
@@ -1552,8 +1538,10 @@ class MainWindow(QMainWindow):
             if not stem:
                 raise ToolError("Output stem is empty.")
 
-            script_name = f"{stem}__image.sh"
-            jpg_name = f"{stem}.jpg"
+            left_frame = self.current_absolute_frame("left")
+            stem_with_frame = with_left_frame_suffix(stem, left_frame)
+            script_name = f"{stem_with_frame}__image.sh"
+            jpg_name = f"{stem_with_frame}.jpg"
             script_path = self.work_dir / script_name
 
             self.save_settings()
