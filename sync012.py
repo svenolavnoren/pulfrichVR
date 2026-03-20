@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QSlider,
     QSpinBox,
     QDoubleSpinBox,
     QVBoxLayout,
@@ -76,7 +77,7 @@ DEFAULT_YAW_LEFT = 0.0
 DEFAULT_YAW_RIGHT = 0.0
 DEFAULT_OUTPUT_PREFIX = ""
 DEFAULT_DURATION_TEST = 20
-DEFAULT_PREVIEW_SECONDS = 10
+DEFAULT_PREVIEW_SECONDS = 2
 DEFAULT_PREVIEW_HEIGHT = 720
 
 
@@ -88,12 +89,42 @@ def is_insv(path: Path) -> bool:
     return path.suffix.lower() == ".insv"
 
 
+def is_lrv(path: Path) -> bool:
+    return path.suffix.lower() == ".lrv"
+
+
+def count_video_streams(path: Path) -> int:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "json",
+        str(path),
+    ]
+    raw = run_checked(cmd)
+    data = json.loads(raw)
+    return len(data.get("streams", []))
+
+
+def source_mode_for_path(path: Path) -> str:
+    if is_lrv(path):
+        return "packed"
+    if is_insv(path):
+        return "insv" if count_video_streams(path) >= 2 else "packed"
+    return "flat"
+
+
 def source_mode_for_pair(left: Path, right: Path) -> str:
-    left_is_insv = is_insv(left)
-    right_is_insv = is_insv(right)
-    if left_is_insv != right_is_insv:
-        raise ToolError("Left/right must both be INSV or both be MOV/MP4 style files.")
-    return "insv" if left_is_insv else "flat"
+    left_mode = source_mode_for_path(left)
+    right_mode = source_mode_for_path(right)
+    if left_mode != right_mode:
+        raise ToolError("Left/right must both resolve to the same source mode.")
+    return left_mode
 
 
 @dataclass
@@ -197,12 +228,11 @@ def build_preview_dir_name(
     preview_height: int,
     fov: float,
     yaw: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> str:
-    mode_tag = "insv" if use_insv_pipeline else "flat"
     return (
-        f"{src.stem}__{mode_tag}__ps{preview_seconds}"
+        f"{src.stem}__{source_mode}__ps{preview_seconds}"
         f"__ss{preview_cache_tag(season_start_seconds)}"
         f"__h{preview_height}__fov{preview_cache_tag(fov)}__yaw{preview_cache_tag(yaw)}__frames"
     )
@@ -214,7 +244,7 @@ def preview_cache_metadata(
     preview_height: int,
     fov: float,
     yaw: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> dict[str, object]:
     return {
@@ -224,7 +254,7 @@ def preview_cache_metadata(
         "preview_height": preview_height,
         "fov": round(fov, 6),
         "yaw": round(yaw, 6),
-        "use_insv_pipeline": use_insv_pipeline,
+        "source_mode": source_mode,
         "season_start_seconds": round(season_start_seconds, 6),
     }
 
@@ -236,7 +266,7 @@ def build_preview_frames(
     fov: float,
     yaw: float,
     preview_height: int,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> PreviewSet:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -249,7 +279,7 @@ def build_preview_frames(
         fov=fov,
         yaw=yaw,
         preview_height=preview_height,
-        use_insv_pipeline=use_insv_pipeline,
+        source_mode=source_mode,
         season_start_seconds=season_start_seconds,
     )
     run_checked(cmd)
@@ -263,9 +293,23 @@ def build_preview_command(
     fov: float,
     yaw: float,
     preview_height: int,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> list[str]:
+    if source_mode == "insv":
+        filter_graph = (
+            f"[0:v:0][0:v:1]hstack[df];"
+            f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
+            f"scale=-2:{preview_height}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            f"[0:v:0]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
+            f"scale=-2:{preview_height}[v]"
+        )
+    else:
+        filter_graph = f"[0:v:0]scale=-2:{preview_height}[v]"
+
     return [
         "ffmpeg",
         "-y",
@@ -280,15 +324,7 @@ def build_preview_command(
         "-i",
         str(src),
         "-filter_complex",
-        (
-            (
-                f"[0:v:0][0:v:1]hstack[df];"
-                f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
-                f"scale=-2:{preview_height}[v]"
-            )
-            if use_insv_pipeline
-            else f"[0:v:0]scale=-2:{preview_height}[v]"
-        ),
+        filter_graph,
         "-map",
         "[v]",
         "-an",
@@ -319,7 +355,7 @@ def qpixmap_from_file(path: Path) -> QPixmap:
 
 
 def extract_number_triplet(name: str) -> Optional[str]:
-    m = re.search(r"_(\d{3})\.(?:insv|mp4|mov)$", name, flags=re.IGNORECASE)
+    m = re.search(r"_(\d{3})\.(?:insv|mp4|mov|lrv)$", name, flags=re.IGNORECASE)
     if m:
         return m.group(1)
     m = re.search(r"_(\d{3})(?:_|\.)", name)
@@ -344,6 +380,11 @@ def infer_output_stem(left_path: Path, right_path: Path, prefix: str = DEFAULT_O
     else:
         parts.append(f"{left_path.stem}-{right_path.stem}")
     return "-".join(parts)
+
+
+def with_left_frame_suffix(stem: str, left_frame: int) -> str:
+    base = re.sub(r"__L\d+$", "", stem)
+    return f"{base}__L{left_frame:06d}"
 
 
 def shell_quote(path: str) -> str:
@@ -415,12 +456,12 @@ def build_image_script_text(
     fov_right: float,
     yaw_left: float,
     yaw_right: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
     left_ts = left_frame_index / max(fps, 0.001)
     right_ts = right_frame_index / max(fps, 0.001)
 
-    if use_insv_pipeline:
+    if source_mode == "insv":
         filter_graph = (
             f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0a]; "
             f"[0:v:1]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0b]; "
@@ -429,6 +470,22 @@ def build_image_script_text(
             f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0a]; "
             f"[1:v:1]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0b]; "
             f"[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -519,9 +576,9 @@ def build_fast_batch_image_dump_script_text(
     fov_right: float,
     yaw_left: float,
     yaw_right: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
-    if use_insv_pipeline:
+    if source_mode == "insv":
         filter_graph = (
             "[0:v:0]format=rgb24[f0a]; "
             "[0:v:1]format=rgb24[f0b]; "
@@ -530,6 +587,22 @@ def build_fast_batch_image_dump_script_text(
             "[1:v:0]format=rgb24[g0a]; "
             "[1:v:1]format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            "[0:v:0]format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            "[1:v:0]format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -600,7 +673,7 @@ def build_batch_image_dump_script_text(
     yaw_right: float,
     left_preview_count: int,
     right_preview_count: int,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
     season_start_frame = int(round(season_start_seconds * fps))
     if offset_frames >= 0:
@@ -612,7 +685,7 @@ def build_batch_image_dump_script_text(
         right_start = 0
         pair_count = min(max(0, left_preview_count + offset_frames), right_preview_count)
 
-    if use_insv_pipeline:
+    if source_mode == "insv":
         filter_graph = (
             "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0a]; "
             "[0:v:1]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0b]; "
@@ -621,6 +694,22 @@ def build_batch_image_dump_script_text(
             "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0a]; "
             "[1:v:1]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -704,7 +793,7 @@ def build_ffmpeg_script_text(
     yaw_right: float,
     test_seconds: int,
     include_test_duration: bool,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
     trim_seconds = abs(offset_frames) / max(fps, 0.001)
     trim_str = f"{trim_seconds:.6f}"
@@ -726,7 +815,7 @@ def build_ffmpeg_script_text(
 
     duration_line = '  -t "$TEST_SECONDS" \\\n' if include_test_duration else ""
 
-    if use_insv_pipeline:
+    if source_mode == "insv":
         video_graph = (
             f"[0:v:0]{left_trim_v0}format=rgb24[f0a]; "
             f"[0:v:1]{left_trim_v1}format=rgb24[f0b]; "
@@ -735,6 +824,22 @@ def build_ffmpeg_script_text(
             f"[1:v:0]{right_trim_v0}format=rgb24[g0a]; "
             f"[1:v:1]{right_trim_v1}format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        video_graph = (
+            f"[0:v:0]{left_trim_v0}format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            f"[1:v:0]{right_trim_v0}format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -756,7 +861,7 @@ def build_ffmpeg_script_text(
 
     audio_filter = ""
     audio_map = ""
-    if use_insv_pipeline:
+    if source_mode in {"insv", "packed"}:
         audio_filter = (
             f"[0:a]pan=mono|c0=c0{left_trim_a}[a0]; "
             f"[1:a]pan=mono|c0=c0{right_trim_a}[a1]; "
@@ -765,7 +870,7 @@ def build_ffmpeg_script_text(
         audio_map = ' -map "[a]"'
 
     filter_complex = video_graph if not audio_filter else f"{video_graph}; {audio_filter}"
-    audio_codec_block = '  -c:a aac -b:a 192k \\\n' if use_insv_pipeline else ""
+    audio_codec_block = '  -c:a aac -b:a 192k \\\n' if source_mode in {"insv", "packed"} else ""
 
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -915,7 +1020,7 @@ class MainWindow(QMainWindow):
         self.preview_progress_label = QLabel("Preview progress: idle")
         preview_layout.addWidget(self.preview_progress_label)
 
-        self.preview_scope_label = QLabel("Season: 0.000 s")
+        self.preview_scope_label = QLabel("Window start: 0.000 s")
         preview_layout.addWidget(self.preview_scope_label)
 
         right_panel = QWidget()
@@ -948,14 +1053,6 @@ class MainWindow(QMainWindow):
         self.right_frame_box = QSpinBox()
         self.right_frame_box.setRange(0, 10_000_000)
         self.right_frame_box.valueChanged.connect(self.on_right_frame_changed)
-        self.jump_edit = QLineEdit()
-        self.jump_edit.setPlaceholderText("season start: sec, frame, or mm:ss")
-        self.jump_edit.returnPressed.connect(self.jump_to_position)
-        btn_jump = QPushButton("Jump")
-        btn_jump.clicked.connect(self.jump_to_position)
-        btn_prev_season = QPushButton("Season -")
-        btn_next_season = QPushButton("Season +")
-
         btn_l_prev = QPushButton("L -")
         btn_l_next = QPushButton("L +")
         btn_r_prev = QPushButton("R -")
@@ -969,12 +1066,14 @@ class MainWindow(QMainWindow):
         btn_r_next.clicked.connect(lambda: self.bump_frame("right", +self.step_spin.value()))
         btn_both_prev.clicked.connect(lambda: self.bump_both(-self.step_spin.value()))
         btn_both_next.clicked.connect(lambda: self.bump_both(+self.step_spin.value()))
-        btn_prev_season.clicked.connect(lambda: self.bump_season(-1))
-        btn_next_season.clicked.connect(lambda: self.bump_season(+1))
 
         self.offset_label = QLabel("Offset: 0 frames (0.000000 s)")
         self.offset_label.setStyleSheet("font-weight:bold;")
         self.absolute_label = QLabel("Absolute frames: L 0, R 0")
+        self.window_slider = QSlider(Qt.Horizontal)
+        self.window_slider.setRange(0, 0)
+        self.window_slider.valueChanged.connect(self.on_window_slider_changed)
+        self.window_slider_label = QLabel("Window frame: 0 / 0")
 
         controls_layout.addWidget(QLabel("FPS:"), 0, 0)
         controls_layout.addWidget(self.fps_box, 0, 1)
@@ -992,16 +1091,14 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(btn_r_prev, 2, 2)
         controls_layout.addWidget(btn_r_next, 2, 3)
 
-        controls_layout.addWidget(QLabel("Jump:"), 3, 0)
-        controls_layout.addWidget(self.jump_edit, 3, 1)
-        controls_layout.addWidget(btn_jump, 3, 2)
-        controls_layout.addWidget(btn_prev_season, 3, 3)
-        controls_layout.addWidget(btn_next_season, 3, 4)
+        controls_layout.addWidget(self.window_slider_label, 3, 0, 1, 5)
 
-        controls_layout.addWidget(btn_both_prev, 4, 2)
-        controls_layout.addWidget(btn_both_next, 4, 3)
-        controls_layout.addWidget(self.offset_label, 4, 0, 1, 2)
-        controls_layout.addWidget(self.absolute_label, 5, 0, 1, 5)
+        controls_layout.addWidget(QLabel("Slide:"), 4, 0)
+        controls_layout.addWidget(self.window_slider, 4, 1, 1, 4)
+        controls_layout.addWidget(btn_both_prev, 5, 2)
+        controls_layout.addWidget(btn_both_next, 5, 3)
+        controls_layout.addWidget(self.offset_label, 5, 0, 1, 2)
+        controls_layout.addWidget(self.absolute_label, 6, 0, 1, 5)
 
         gen = QGroupBox("Generate script")
         right_layout.addWidget(gen)
@@ -1019,7 +1116,7 @@ class MainWindow(QMainWindow):
         self.right_fov_box = QDoubleSpinBox(); self.right_fov_box.setRange(1.0, 360.0); self.right_fov_box.setDecimals(3); self.right_fov_box.setValue(DEFAULT_FOV); self.right_fov_box.editingFinished.connect(self.save_settings)
         self.left_yaw_box = QDoubleSpinBox(); self.left_yaw_box.setRange(-360.0, 360.0); self.left_yaw_box.setDecimals(3); self.left_yaw_box.setValue(DEFAULT_YAW_LEFT); self.left_yaw_box.editingFinished.connect(self.save_settings)
         self.right_yaw_box = QDoubleSpinBox(); self.right_yaw_box.setRange(-360.0, 360.0); self.right_yaw_box.setDecimals(3); self.right_yaw_box.setValue(DEFAULT_YAW_RIGHT); self.right_yaw_box.editingFinished.connect(self.save_settings)
-        self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 300); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
+        self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 10000); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
         self.preview_height_box = QSpinBox(); self.preview_height_box.setRange(120, 2160); self.preview_height_box.setSingleStep(120); self.preview_height_box.setValue(DEFAULT_PREVIEW_HEIGHT); self.preview_height_box.editingFinished.connect(self.save_settings)
         self.season_start_box = QDoubleSpinBox(); self.season_start_box.setRange(0.0, 24 * 3600.0); self.season_start_box.setDecimals(3); self.season_start_box.setSingleStep(1.0); self.season_start_box.setValue(0.0); self.season_start_box.editingFinished.connect(self.save_settings)
         self.test_seconds_box = QSpinBox(); self.test_seconds_box.setRange(1, 3600); self.test_seconds_box.setValue(DEFAULT_DURATION_TEST); self.test_seconds_box.editingFinished.connect(self.save_settings)
@@ -1045,7 +1142,7 @@ class MainWindow(QMainWindow):
         gen_form.addRow("Right FOV:", self.right_fov_box)
         gen_form.addRow("Left yaw:", self.left_yaw_box)
         gen_form.addRow("Right yaw:", self.right_yaw_box)
-        gen_form.addRow("Season start (sec):", self.season_start_box)
+        gen_form.addRow("Window start (sec):", self.season_start_box)
         gen_form.addRow("Preview seconds:", self.preview_seconds_box)
         gen_form.addRow("Preview height:", self.preview_height_box)
         gen_form.addRow("Test seconds const:", self.test_seconds_box)
@@ -1142,7 +1239,7 @@ class MainWindow(QMainWindow):
 
     def refresh_file_lists(self) -> None:
         files = sorted(
-            [p for p in self.work_dir.iterdir() if p.is_file() and p.suffix.lower() in {".insv", ".mov", ".mp4"}],
+            [p for p in self.work_dir.iterdir() if p.is_file() and p.suffix.lower() in {".insv", ".mov", ".mp4", ".lrv"}],
             key=lambda p: p.name.lower(),
         )
         names = [p.name for p in files]
@@ -1155,7 +1252,7 @@ class MainWindow(QMainWindow):
             self.right_combo.setCurrentIndex(1)
             if not self.output_stem_edit.text().strip():
                 self.fill_output_name()
-        self.log_msg(f"Found {len(names)} video file(s) (.insv/.mov/.mp4) in {self.work_dir}")
+        self.log_msg(f"Found {len(names)} video file(s) (.insv/.mov/.mp4/.lrv) in {self.work_dir}")
 
     def current_left_path(self) -> Path:
         return self.work_dir / self.left_combo.currentText()
@@ -1224,6 +1321,10 @@ class MainWindow(QMainWindow):
             self.btn_stop_preview.setEnabled(False)
             self.left_frame_box.setRange(0, max(0, self.left_preview.frame_count - 1) if self.left_preview else 0)
             self.right_frame_box.setRange(0, max(0, self.right_preview.frame_count - 1) if self.right_preview else 0)
+            self.window_slider.blockSignals(True)
+            self.window_slider.setRange(0, max(0, self.left_preview.frame_count - 1) if self.left_preview else 0)
+            self.window_slider.setValue(0)
+            self.window_slider.blockSignals(False)
             self.fill_output_name()
             self.refresh_previews()
             if self.left_preview and self.right_preview:
@@ -1247,7 +1348,7 @@ class MainWindow(QMainWindow):
         self.preview_expected_frames = max(1, int(round(fps * preview_seconds)))
         self.set_preview_progress(f"{side} 0/{self.preview_expected_frames}")
         self.log_msg(
-            f"Building {side} preview (season_start={season_start_seconds:.3f}s, "
+            f"Building {side} preview ({self.current_preview_job['source_mode']}, season_start={season_start_seconds:.3f}s, "
             f"duration={preview_seconds}s, h={preview_height}, fov={fov}, yaw={yaw}) …"
         )
 
@@ -1264,7 +1365,7 @@ class MainWindow(QMainWindow):
             fov=fov,
             yaw=yaw,
             preview_height=preview_height,
-            use_insv_pipeline=bool(self.current_preview_job["use_insv_pipeline"]),
+            source_mode=str(self.current_preview_job["source_mode"]),
             season_start_seconds=season_start_seconds,
         )
         process.setArguments(cmd[1:])
@@ -1328,7 +1429,7 @@ class MainWindow(QMainWindow):
             if left == right:
                 raise ToolError("Left and right files must be different.")
 
-            use_insv_pipeline = source_mode_for_pair(left, right) == "insv"
+            source_mode = source_mode_for_pair(left, right)
 
             self.left_info = ffprobe_video_info(left)
             self.right_info = ffprobe_video_info(right)
@@ -1343,7 +1444,7 @@ class MainWindow(QMainWindow):
                     self.preview_height_box.value(),
                     self.left_fov_box.value(),
                     self.left_yaw_box.value(),
-                    use_insv_pipeline,
+                    source_mode,
                     self.season_start_box.value(),
                 ),
                 "right": preview_dir / build_preview_dir_name(
@@ -1352,7 +1453,7 @@ class MainWindow(QMainWindow):
                     self.preview_height_box.value(),
                     self.right_fov_box.value(),
                     self.right_yaw_box.value(),
-                    use_insv_pipeline,
+                    source_mode,
                     self.season_start_box.value(),
                 ),
             }
@@ -1377,6 +1478,10 @@ class MainWindow(QMainWindow):
             self.right_frame_box.blockSignals(False)
             self.left_frame_box.setRange(0, 0)
             self.right_frame_box.setRange(0, 0)
+            self.window_slider.blockSignals(True)
+            self.window_slider.setRange(0, 0)
+            self.window_slider.setValue(0)
+            self.window_slider.blockSignals(False)
 
             self.preview_queue = [
                 {
@@ -1389,7 +1494,7 @@ class MainWindow(QMainWindow):
                     "fov": left_fov,
                     "yaw": left_yaw,
                     "fps": fps,
-                    "use_insv_pipeline": use_insv_pipeline,
+                    "source_mode": source_mode,
                 },
                 {
                     "side": "right",
@@ -1401,7 +1506,7 @@ class MainWindow(QMainWindow):
                     "fov": right_fov,
                     "yaw": right_yaw,
                     "fps": fps,
-                    "use_insv_pipeline": use_insv_pipeline,
+                    "source_mode": source_mode,
                 },
             ]
             self.start_next_preview_build()
@@ -1409,10 +1514,22 @@ class MainWindow(QMainWindow):
             self.show_error(e)
 
     def on_left_frame_changed(self, value: int) -> None:
+        self.window_slider.blockSignals(True)
+        self.window_slider.setValue(value)
+        self.window_slider.blockSignals(False)
         self.refresh_previews()
 
     def on_right_frame_changed(self, value: int) -> None:
         self.refresh_previews()
+
+    def on_window_slider_changed(self, value: int) -> None:
+        current_left = self.left_frame_box.value()
+        current_right = self.right_frame_box.value()
+        delta = value - current_left
+        self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), value)))
+        self.right_frame_box.setValue(
+            max(0, min(self.right_frame_box.maximum(), current_right + delta))
+        )
 
     def bump_frame(self, side: str, delta: int) -> None:
         if side == "left":
@@ -1428,11 +1545,6 @@ class MainWindow(QMainWindow):
         self.left_frame_box.setValue(max(0, min(self.left_frame_box.maximum(), self.left_frame_box.value() + delta)))
         self.right_frame_box.setValue(max(0, min(self.right_frame_box.maximum(), self.right_frame_box.value() + delta)))
 
-    def bump_season(self, direction: int) -> None:
-        step = self.preview_seconds_box.value()
-        self.season_start_box.setValue(max(0.0, self.season_start_box.value() + direction * step))
-        self.save_settings()
-
     def current_preview_set(self, side: str) -> Optional[PreviewSet]:
         return self.left_preview if side == "left" else self.right_preview
 
@@ -1442,39 +1554,6 @@ class MainWindow(QMainWindow):
         if preview is not None:
             return preview.absolute_frame_index(local_index)
         return local_index
-
-    def parse_jump_value(self, text: str) -> int:
-        raw = text.strip()
-        if not raw:
-            raise ToolError("Jump is empty.")
-        if ":" in raw:
-            parts = raw.split(":")
-            if len(parts) == 2:
-                minutes = int(parts[0])
-                seconds = float(parts[1])
-                total_seconds = minutes * 60 + seconds
-            elif len(parts) == 3:
-                hours = int(parts[0])
-                minutes = int(parts[1])
-                seconds = float(parts[2])
-                total_seconds = hours * 3600 + minutes * 60 + seconds
-            else:
-                raise ToolError("Jump time must be sec, mm:ss or hh:mm:ss.")
-            return max(0, int(round(total_seconds * max(self.fps_box.value(), 0.001))))
-        if any(ch in raw for ch in ".eE"):
-            return max(0, int(round(float(raw) * max(self.fps_box.value(), 0.001))))
-        return max(0, int(raw))
-
-    def jump_to_position(self) -> None:
-        try:
-            frame_index = self.parse_jump_value(self.jump_edit.text())
-            season_start_seconds = frame_index / max(self.fps_box.value(), 0.001)
-            self.season_start_box.setValue(season_start_seconds)
-            self.left_frame_box.setValue(0)
-            self.right_frame_box.setValue(0)
-            self.save_settings()
-        except Exception as e:
-            self.show_error(e)
 
     def refresh_previews(self) -> None:
         try:
@@ -1526,13 +1605,19 @@ class MainWindow(QMainWindow):
             f"Absolute frames: L {left_abs} ({left_abs_sec:.3f}s), "
             f"R {right_abs} ({right_abs_sec:.3f}s)"
         )
-        self.preview_scope_label.setText(f"Season: {self.season_start_box.value():.3f} s")
+        self.preview_scope_label.setText(f"Window start: {self.season_start_box.value():.3f} s")
+        self.window_slider_label.setText(
+            f"Window frame: {self.left_frame_box.value()} / {self.left_frame_box.maximum()}"
+        )
 
     def fill_output_name(self) -> None:
         try:
             left = self.current_left_path()
             right = self.current_right_path()
-            self.output_stem_edit.setText(infer_output_stem(left, right))
+            stem = infer_output_stem(left, right)
+            if self.left_preview is not None:
+                stem = with_left_frame_suffix(stem, self.current_absolute_frame("left"))
+            self.output_stem_edit.setText(stem)
             self.save_settings()
         except Exception:
             pass
@@ -1552,8 +1637,10 @@ class MainWindow(QMainWindow):
             if not stem:
                 raise ToolError("Output stem is empty.")
 
-            script_name = f"{stem}__image.sh"
-            jpg_name = f"{stem}.jpg"
+            left_frame = self.current_absolute_frame("left")
+            stem_with_frame = with_left_frame_suffix(stem, left_frame)
+            script_name = f"{stem_with_frame}__image.sh"
+            jpg_name = f"{stem_with_frame}.jpg"
             script_path = self.work_dir / script_name
 
             self.save_settings()
@@ -1574,7 +1661,7 @@ class MainWindow(QMainWindow):
                 fov_right=self.right_fov_box.value(),
                 yaw_left=self.left_yaw_box.value(),
                 yaw_right=self.right_yaw_box.value(),
-                use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                source_mode=source_mode_for_pair(left, right),
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
@@ -1632,7 +1719,7 @@ class MainWindow(QMainWindow):
                     yaw_right=self.right_yaw_box.value(),
                     left_preview_count=self.left_preview.frame_count,
                     right_preview_count=self.right_preview.frame_count,
-                    use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                    source_mode=source_mode_for_pair(left, right),
                 )
             else:
                 text = build_fast_batch_image_dump_script_text(
@@ -1647,7 +1734,7 @@ class MainWindow(QMainWindow):
                     fov_right=self.right_fov_box.value(),
                     yaw_left=self.left_yaw_box.value(),
                     yaw_right=self.right_yaw_box.value(),
-                    use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                    source_mode=source_mode_for_pair(left, right),
                 )
  
             script_path.write_text(text, encoding="utf-8")
@@ -1699,7 +1786,7 @@ class MainWindow(QMainWindow):
                 yaw_right=self.right_yaw_box.value(),
                 test_seconds=self.test_seconds_box.value(),
                 include_test_duration=self.use_test_duration_box.isChecked(),
-                use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                source_mode=source_mode_for_pair(left, right),
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
