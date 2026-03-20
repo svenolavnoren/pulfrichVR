@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-# sync012.py
+# sync010.py
 # Copyright 2026 Sven-Olav Norén
 # Licensed under the Apache License, Version 2.0
 # SPDX-License-Identifier: Apache-2.0
@@ -345,6 +345,11 @@ def infer_output_stem(left_path: Path, right_path: Path, prefix: str = DEFAULT_O
     else:
         parts.append(f"{left_path.stem}-{right_path.stem}")
     return "-".join(parts)
+
+
+def with_left_frame_suffix(stem: str, left_frame: int) -> str:
+    base = re.sub(r"__L\d+$", "", stem)
+    return f"{base}__L{left_frame:06d}"
 
 
 def shell_quote(path: str) -> str:
@@ -949,12 +954,6 @@ class MainWindow(QMainWindow):
         self.right_frame_box = QSpinBox()
         self.right_frame_box.setRange(0, 10_000_000)
         self.right_frame_box.valueChanged.connect(self.on_right_frame_changed)
-        self.jump_edit = QLineEdit()
-        self.jump_edit.setPlaceholderText("window start: sec, frame, or mm:ss")
-        self.jump_edit.returnPressed.connect(self.jump_to_position)
-        btn_jump = QPushButton("Jump")
-        btn_jump.clicked.connect(self.jump_to_position)
-
         btn_l_prev = QPushButton("L -")
         btn_l_next = QPushButton("L +")
         btn_r_prev = QPushButton("R -")
@@ -993,10 +992,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(btn_r_prev, 2, 2)
         controls_layout.addWidget(btn_r_next, 2, 3)
 
-        controls_layout.addWidget(QLabel("Jump:"), 3, 0)
-        controls_layout.addWidget(self.jump_edit, 3, 1)
-        controls_layout.addWidget(btn_jump, 3, 2)
-        controls_layout.addWidget(self.window_slider_label, 3, 3, 1, 2)
+        controls_layout.addWidget(self.window_slider_label, 3, 0, 1, 5)
 
         controls_layout.addWidget(QLabel("Slide:"), 4, 0)
         controls_layout.addWidget(self.window_slider, 4, 1, 1, 4)
@@ -1021,7 +1017,7 @@ class MainWindow(QMainWindow):
         self.right_fov_box = QDoubleSpinBox(); self.right_fov_box.setRange(1.0, 360.0); self.right_fov_box.setDecimals(3); self.right_fov_box.setValue(DEFAULT_FOV); self.right_fov_box.editingFinished.connect(self.save_settings)
         self.left_yaw_box = QDoubleSpinBox(); self.left_yaw_box.setRange(-360.0, 360.0); self.left_yaw_box.setDecimals(3); self.left_yaw_box.setValue(DEFAULT_YAW_LEFT); self.left_yaw_box.editingFinished.connect(self.save_settings)
         self.right_yaw_box = QDoubleSpinBox(); self.right_yaw_box.setRange(-360.0, 360.0); self.right_yaw_box.setDecimals(3); self.right_yaw_box.setValue(DEFAULT_YAW_RIGHT); self.right_yaw_box.editingFinished.connect(self.save_settings)
-        self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 300); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
+        self.preview_seconds_box = QSpinBox(); self.preview_seconds_box.setRange(1, 10000); self.preview_seconds_box.setValue(DEFAULT_PREVIEW_SECONDS); self.preview_seconds_box.editingFinished.connect(self.save_settings)
         self.preview_height_box = QSpinBox(); self.preview_height_box.setRange(120, 2160); self.preview_height_box.setSingleStep(120); self.preview_height_box.setValue(DEFAULT_PREVIEW_HEIGHT); self.preview_height_box.editingFinished.connect(self.save_settings)
         self.season_start_box = QDoubleSpinBox(); self.season_start_box.setRange(0.0, 24 * 3600.0); self.season_start_box.setDecimals(3); self.season_start_box.setSingleStep(1.0); self.season_start_box.setValue(0.0); self.season_start_box.editingFinished.connect(self.save_settings)
         self.test_seconds_box = QSpinBox(); self.test_seconds_box.setRange(1, 3600); self.test_seconds_box.setValue(DEFAULT_DURATION_TEST); self.test_seconds_box.editingFinished.connect(self.save_settings)
@@ -1460,40 +1456,6 @@ class MainWindow(QMainWindow):
             return preview.absolute_frame_index(local_index)
         return local_index
 
-    def parse_jump_value(self, text: str) -> int:
-        raw = text.strip()
-        if not raw:
-            raise ToolError("Jump is empty.")
-        if ":" in raw:
-            parts = raw.split(":")
-            if len(parts) == 2:
-                minutes = int(parts[0])
-                seconds = float(parts[1])
-                total_seconds = minutes * 60 + seconds
-            elif len(parts) == 3:
-                hours = int(parts[0])
-                minutes = int(parts[1])
-                seconds = float(parts[2])
-                total_seconds = hours * 3600 + minutes * 60 + seconds
-            else:
-                raise ToolError("Jump time must be sec, mm:ss or hh:mm:ss.")
-            return max(0, int(round(total_seconds * max(self.fps_box.value(), 0.001))))
-        if any(ch in raw for ch in ".eE"):
-            return max(0, int(round(float(raw) * max(self.fps_box.value(), 0.001))))
-        return max(0, int(raw))
-
-    def jump_to_position(self) -> None:
-        try:
-            frame_index = self.parse_jump_value(self.jump_edit.text())
-            season_start_seconds = frame_index / max(self.fps_box.value(), 0.001)
-            self.season_start_box.setValue(season_start_seconds)
-            self.left_frame_box.setValue(0)
-            self.right_frame_box.setValue(0)
-            self.save_settings()
-            self.build_previews()
-        except Exception as e:
-            self.show_error(e)
-
     def refresh_previews(self) -> None:
         try:
             if not self.left_preview or not self.right_preview:
@@ -1553,7 +1515,10 @@ class MainWindow(QMainWindow):
         try:
             left = self.current_left_path()
             right = self.current_right_path()
-            self.output_stem_edit.setText(infer_output_stem(left, right))
+            stem = infer_output_stem(left, right)
+            if self.left_preview is not None:
+                stem = with_left_frame_suffix(stem, self.current_absolute_frame("left"))
+            self.output_stem_edit.setText(stem)
             self.save_settings()
         except Exception:
             pass
@@ -1573,8 +1538,10 @@ class MainWindow(QMainWindow):
             if not stem:
                 raise ToolError("Output stem is empty.")
 
-            script_name = f"{stem}__image.sh"
-            jpg_name = f"{stem}.jpg"
+            left_frame = self.current_absolute_frame("left")
+            stem_with_frame = with_left_frame_suffix(stem, left_frame)
+            script_name = f"{stem_with_frame}__image.sh"
+            jpg_name = f"{stem_with_frame}.jpg"
             script_path = self.work_dir / script_name
 
             self.save_settings()
