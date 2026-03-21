@@ -89,12 +89,42 @@ def is_insv(path: Path) -> bool:
     return path.suffix.lower() == ".insv"
 
 
+def is_lrv(path: Path) -> bool:
+    return path.suffix.lower() == ".lrv"
+
+
+def count_video_streams(path: Path) -> int:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "json",
+        str(path),
+    ]
+    raw = run_checked(cmd)
+    data = json.loads(raw)
+    return len(data.get("streams", []))
+
+
+def source_mode_for_path(path: Path) -> str:
+    if is_lrv(path):
+        return "packed"
+    if is_insv(path):
+        return "insv" if count_video_streams(path) >= 2 else "packed"
+    return "flat"
+
+
 def source_mode_for_pair(left: Path, right: Path) -> str:
-    left_is_insv = is_insv(left)
-    right_is_insv = is_insv(right)
-    if left_is_insv != right_is_insv:
-        raise ToolError("Left/right must both be INSV or both be MOV/MP4 style files.")
-    return "insv" if left_is_insv else "flat"
+    left_mode = source_mode_for_path(left)
+    right_mode = source_mode_for_path(right)
+    if left_mode != right_mode:
+        raise ToolError("Left/right must both resolve to the same source mode.")
+    return left_mode
 
 
 @dataclass
@@ -198,12 +228,11 @@ def build_preview_dir_name(
     preview_height: int,
     fov: float,
     yaw: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> str:
-    mode_tag = "insv" if use_insv_pipeline else "flat"
     return (
-        f"{src.stem}__{mode_tag}__ps{preview_seconds}"
+        f"{src.stem}__{source_mode}__ps{preview_seconds}"
         f"__ss{preview_cache_tag(season_start_seconds)}"
         f"__h{preview_height}__fov{preview_cache_tag(fov)}__yaw{preview_cache_tag(yaw)}__frames"
     )
@@ -215,7 +244,7 @@ def preview_cache_metadata(
     preview_height: int,
     fov: float,
     yaw: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> dict[str, object]:
     return {
@@ -225,7 +254,7 @@ def preview_cache_metadata(
         "preview_height": preview_height,
         "fov": round(fov, 6),
         "yaw": round(yaw, 6),
-        "use_insv_pipeline": use_insv_pipeline,
+        "source_mode": source_mode,
         "season_start_seconds": round(season_start_seconds, 6),
     }
 
@@ -237,7 +266,7 @@ def build_preview_frames(
     fov: float,
     yaw: float,
     preview_height: int,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> PreviewSet:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +279,7 @@ def build_preview_frames(
         fov=fov,
         yaw=yaw,
         preview_height=preview_height,
-        use_insv_pipeline=use_insv_pipeline,
+        source_mode=source_mode,
         season_start_seconds=season_start_seconds,
     )
     run_checked(cmd)
@@ -264,9 +293,23 @@ def build_preview_command(
     fov: float,
     yaw: float,
     preview_height: int,
-    use_insv_pipeline: bool,
+    source_mode: str,
     season_start_seconds: float,
 ) -> list[str]:
+    if source_mode == "insv":
+        filter_graph = (
+            f"[0:v:0][0:v:1]hstack[df];"
+            f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
+            f"scale=-2:{preview_height}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            f"[0:v:0]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
+            f"scale=-2:{preview_height}[v]"
+        )
+    else:
+        filter_graph = f"[0:v:0]scale=-2:{preview_height}[v]"
+
     return [
         "ffmpeg",
         "-y",
@@ -281,15 +324,7 @@ def build_preview_command(
         "-i",
         str(src),
         "-filter_complex",
-        (
-            (
-                f"[0:v:0][0:v:1]hstack[df];"
-                f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
-                f"scale=-2:{preview_height}[v]"
-            )
-            if use_insv_pipeline
-            else f"[0:v:0]scale=-2:{preview_height}[v]"
-        ),
+        filter_graph,
         "-map",
         "[v]",
         "-an",
@@ -320,7 +355,7 @@ def qpixmap_from_file(path: Path) -> QPixmap:
 
 
 def extract_number_triplet(name: str) -> Optional[str]:
-    m = re.search(r"_(\d{3})\.(?:insv|mp4|mov)$", name, flags=re.IGNORECASE)
+    m = re.search(r"_(\d{3})\.(?:insv|mp4|mov|lrv)$", name, flags=re.IGNORECASE)
     if m:
         return m.group(1)
     m = re.search(r"_(\d{3})(?:_|\.)", name)
@@ -330,6 +365,31 @@ def extract_number_triplet(name: str) -> Optional[str]:
 def extract_date_yyyymmdd(name: str) -> Optional[str]:
     m = re.search(r"VID_(\d{8})_", name)
     return m.group(1) if m else None
+
+
+def extract_insta_capture_key(name: str) -> Optional[tuple[str, str]]:
+    m = re.match(r"(?:VID|LRV)_(\d{8}_\d{6})_\d{2}_(\d{3})\.(?:insv|lrv)$", name, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def find_matching_lrv(path: Path) -> Optional[Path]:
+    key = extract_insta_capture_key(path.name)
+    if key is None:
+        return None
+    stamp, clip = key
+    candidates = sorted(path.parent.glob(f"LRV_{stamp}_*_{clip}.lrv"))
+    return candidates[0] if candidates else None
+
+
+def resolve_preview_sources(left: Path, right: Path) -> tuple[Path, Path, str, bool]:
+    if is_insv(left) and is_insv(right):
+        left_lrv = find_matching_lrv(left)
+        right_lrv = find_matching_lrv(right)
+        if left_lrv is not None and right_lrv is not None:
+            return left_lrv, right_lrv, source_mode_for_pair(left_lrv, right_lrv), True
+    return left, right, source_mode_for_pair(left, right), False
 
 
 def infer_output_stem(left_path: Path, right_path: Path, prefix: str = DEFAULT_OUTPUT_PREFIX) -> str:
@@ -421,12 +481,12 @@ def build_image_script_text(
     fov_right: float,
     yaw_left: float,
     yaw_right: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
     left_ts = left_frame_index / max(fps, 0.001)
     right_ts = right_frame_index / max(fps, 0.001)
 
-    if use_insv_pipeline:
+    if source_mode == "insv":
         filter_graph = (
             f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0a]; "
             f"[0:v:1]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[f0b]; "
@@ -435,6 +495,22 @@ def build_image_script_text(
             f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0a]; "
             f"[1:v:1]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[g0b]; "
             f"[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -525,9 +601,9 @@ def build_fast_batch_image_dump_script_text(
     fov_right: float,
     yaw_left: float,
     yaw_right: float,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
-    if use_insv_pipeline:
+    if source_mode == "insv":
         filter_graph = (
             "[0:v:0]format=rgb24[f0a]; "
             "[0:v:1]format=rgb24[f0b]; "
@@ -536,6 +612,22 @@ def build_fast_batch_image_dump_script_text(
             "[1:v:0]format=rgb24[g0a]; "
             "[1:v:1]format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            "[0:v:0]format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            "[1:v:0]format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -606,7 +698,7 @@ def build_batch_image_dump_script_text(
     yaw_right: float,
     left_preview_count: int,
     right_preview_count: int,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
     season_start_frame = int(round(season_start_seconds * fps))
     if offset_frames >= 0:
@@ -618,7 +710,7 @@ def build_batch_image_dump_script_text(
         right_start = 0
         pair_count = min(max(0, left_preview_count + offset_frames), right_preview_count)
 
-    if use_insv_pipeline:
+    if source_mode == "insv":
         filter_graph = (
             "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0a]; "
             "[0:v:1]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[f0b]; "
@@ -627,6 +719,22 @@ def build_batch_image_dump_script_text(
             "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0a]; "
             "[1:v:1]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        filter_graph = (
+            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -710,7 +818,7 @@ def build_ffmpeg_script_text(
     yaw_right: float,
     test_seconds: int,
     include_test_duration: bool,
-    use_insv_pipeline: bool,
+    source_mode: str,
 ) -> str:
     trim_seconds = abs(offset_frames) / max(fps, 0.001)
     trim_str = f"{trim_seconds:.6f}"
@@ -732,7 +840,7 @@ def build_ffmpeg_script_text(
 
     duration_line = '  -t "$TEST_SECONDS" \\\n' if include_test_duration else ""
 
-    if use_insv_pipeline:
+    if source_mode == "insv":
         video_graph = (
             f"[0:v:0]{left_trim_v0}format=rgb24[f0a]; "
             f"[0:v:1]{left_trim_v1}format=rgb24[f0b]; "
@@ -741,6 +849,22 @@ def build_ffmpeg_script_text(
             f"[1:v:0]{right_trim_v0}format=rgb24[g0a]; "
             f"[1:v:1]{right_trim_v1}format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
+            f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
+            "[lv0]crop='iw/4':ih:0:0[r1]; "
+            "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
+            "[lv3]crop='iw/4':ih:'3*iw/4':0[r4]; "
+            "[rv0]crop='iw/4':ih:0:0[r5]; "
+            "[rv12]crop='iw/2':ih:'iw/4':0[r67]; "
+            "[rv3]crop='iw/4':ih:'3*iw/4':0[r8]; "
+            "[r5][r23][r8]hstack=inputs=3[top]; "
+            "[r1][r67][r4]hstack=inputs=3[bot]; "
+            f"[top][bot]vstack,scale={target_res}:{target_res}[v]"
+        )
+    elif source_mode == "packed":
+        video_graph = (
+            f"[0:v:0]{left_trim_v0}format=rgb24[dfL]; "
+            f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
+            f"[1:v:0]{right_trim_v0}format=rgb24[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -762,7 +886,7 @@ def build_ffmpeg_script_text(
 
     audio_filter = ""
     audio_map = ""
-    if use_insv_pipeline:
+    if source_mode in {"insv", "packed"}:
         audio_filter = (
             f"[0:a]pan=mono|c0=c0{left_trim_a}[a0]; "
             f"[1:a]pan=mono|c0=c0{right_trim_a}[a1]; "
@@ -771,7 +895,7 @@ def build_ffmpeg_script_text(
         audio_map = ' -map "[a]"'
 
     filter_complex = video_graph if not audio_filter else f"{video_graph}; {audio_filter}"
-    audio_codec_block = '  -c:a aac -b:a 192k \\\n' if use_insv_pipeline else ""
+    audio_codec_block = '  -c:a aac -b:a 192k \\\n' if source_mode in {"insv", "packed"} else ""
 
     lines = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -1249,7 +1373,7 @@ class MainWindow(QMainWindow):
         self.preview_expected_frames = max(1, int(round(fps * preview_seconds)))
         self.set_preview_progress(f"{side} 0/{self.preview_expected_frames}")
         self.log_msg(
-            f"Building {side} preview (season_start={season_start_seconds:.3f}s, "
+            f"Building {side} preview ({self.current_preview_job['source_mode']}, season_start={season_start_seconds:.3f}s, "
             f"duration={preview_seconds}s, h={preview_height}, fov={fov}, yaw={yaw}) …"
         )
 
@@ -1266,7 +1390,7 @@ class MainWindow(QMainWindow):
             fov=fov,
             yaw=yaw,
             preview_height=preview_height,
-            use_insv_pipeline=bool(self.current_preview_job["use_insv_pipeline"]),
+            source_mode=str(self.current_preview_job["source_mode"]),
             season_start_seconds=season_start_seconds,
         )
         process.setArguments(cmd[1:])
@@ -1330,31 +1454,38 @@ class MainWindow(QMainWindow):
             if left == right:
                 raise ToolError("Left and right files must be different.")
 
-            use_insv_pipeline = source_mode_for_pair(left, right) == "insv"
+            preview_left, preview_right, source_mode, using_lrv = resolve_preview_sources(left, right)
 
             self.left_info = ffprobe_video_info(left)
             self.right_info = ffprobe_video_info(right)
             fps = min(self.left_info.fps, self.right_info.fps) or DEFAULT_FPS
             self.fps_box.setValue(fps)
 
+            if using_lrv:
+                self.log_msg(
+                    f"Using LRV preview proxies: {preview_left.name} / {preview_right.name} (render/scripts stay on INSV)."
+                )
+            else:
+                self.log_msg("No matching LRV pair found; preview uses the selected source files.")
+
             preview_dir = self.work_dir / ".maud_preview"
             preview_targets = {
                 "left": preview_dir / build_preview_dir_name(
-                    left,
+                    preview_left,
                     self.preview_seconds_box.value(),
                     self.preview_height_box.value(),
                     self.left_fov_box.value(),
                     self.left_yaw_box.value(),
-                    use_insv_pipeline,
+                    source_mode,
                     self.season_start_box.value(),
                 ),
                 "right": preview_dir / build_preview_dir_name(
-                    right,
+                    preview_right,
                     self.preview_seconds_box.value(),
                     self.preview_height_box.value(),
                     self.right_fov_box.value(),
                     self.right_yaw_box.value(),
-                    use_insv_pipeline,
+                    source_mode,
                     self.season_start_box.value(),
                 ),
             }
@@ -1387,7 +1518,7 @@ class MainWindow(QMainWindow):
             self.preview_queue = [
                 {
                     "side": "left",
-                    "src": left,
+                    "src": preview_left,
                     "out_dir": preview_targets["left"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
@@ -1395,11 +1526,11 @@ class MainWindow(QMainWindow):
                     "fov": left_fov,
                     "yaw": left_yaw,
                     "fps": fps,
-                    "use_insv_pipeline": use_insv_pipeline,
+                    "source_mode": source_mode,
                 },
                 {
                     "side": "right",
-                    "src": right,
+                    "src": preview_right,
                     "out_dir": preview_targets["right"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
@@ -1407,7 +1538,7 @@ class MainWindow(QMainWindow):
                     "fov": right_fov,
                     "yaw": right_yaw,
                     "fps": fps,
-                    "use_insv_pipeline": use_insv_pipeline,
+                    "source_mode": source_mode,
                 },
             ]
             self.start_next_preview_build()
@@ -1562,7 +1693,7 @@ class MainWindow(QMainWindow):
                 fov_right=self.right_fov_box.value(),
                 yaw_left=self.left_yaw_box.value(),
                 yaw_right=self.right_yaw_box.value(),
-                use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                source_mode=source_mode_for_pair(left, right),
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
@@ -1620,7 +1751,7 @@ class MainWindow(QMainWindow):
                     yaw_right=self.right_yaw_box.value(),
                     left_preview_count=self.left_preview.frame_count,
                     right_preview_count=self.right_preview.frame_count,
-                    use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                    source_mode=source_mode_for_pair(left, right),
                 )
             else:
                 text = build_fast_batch_image_dump_script_text(
@@ -1635,7 +1766,7 @@ class MainWindow(QMainWindow):
                     fov_right=self.right_fov_box.value(),
                     yaw_left=self.left_yaw_box.value(),
                     yaw_right=self.right_yaw_box.value(),
-                    use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                    source_mode=source_mode_for_pair(left, right),
                 )
  
             script_path.write_text(text, encoding="utf-8")
@@ -1687,7 +1818,7 @@ class MainWindow(QMainWindow):
                 yaw_right=self.right_yaw_box.value(),
                 test_seconds=self.test_seconds_box.value(),
                 include_test_duration=self.use_test_duration_box.isChecked(),
-                use_insv_pipeline=source_mode_for_pair(left, right) == "insv",
+                source_mode=source_mode_for_pair(left, right),
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
