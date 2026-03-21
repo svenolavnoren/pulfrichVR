@@ -367,6 +367,31 @@ def extract_date_yyyymmdd(name: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def extract_insta_capture_key(name: str) -> Optional[tuple[str, str]]:
+    m = re.match(r"(?:VID|LRV)_(\d{8}_\d{6})_\d{2}_(\d{3})\.(?:insv|lrv)$", name, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def find_matching_lrv(path: Path) -> Optional[Path]:
+    key = extract_insta_capture_key(path.name)
+    if key is None:
+        return None
+    stamp, clip = key
+    candidates = sorted(path.parent.glob(f"LRV_{stamp}_*_{clip}.lrv"))
+    return candidates[0] if candidates else None
+
+
+def resolve_preview_sources(left: Path, right: Path) -> tuple[Path, Path, str, bool]:
+    if is_insv(left) and is_insv(right):
+        left_lrv = find_matching_lrv(left)
+        right_lrv = find_matching_lrv(right)
+        if left_lrv is not None and right_lrv is not None:
+            return left_lrv, right_lrv, source_mode_for_pair(left_lrv, right_lrv), True
+    return left, right, source_mode_for_pair(left, right), False
+
+
 def infer_output_stem(left_path: Path, right_path: Path, prefix: str = DEFAULT_OUTPUT_PREFIX) -> str:
     nums_left = extract_number_triplet(left_path.name)
     nums_right = extract_number_triplet(right_path.name)
@@ -1239,7 +1264,7 @@ class MainWindow(QMainWindow):
 
     def refresh_file_lists(self) -> None:
         files = sorted(
-            [p for p in self.work_dir.iterdir() if p.is_file() and p.suffix.lower() in {".insv", ".mov", ".mp4", ".lrv"}],
+            [p for p in self.work_dir.iterdir() if p.is_file() and p.suffix.lower() in {".insv", ".mov", ".mp4"}],
             key=lambda p: p.name.lower(),
         )
         names = [p.name for p in files]
@@ -1252,7 +1277,7 @@ class MainWindow(QMainWindow):
             self.right_combo.setCurrentIndex(1)
             if not self.output_stem_edit.text().strip():
                 self.fill_output_name()
-        self.log_msg(f"Found {len(names)} video file(s) (.insv/.mov/.mp4/.lrv) in {self.work_dir}")
+        self.log_msg(f"Found {len(names)} video file(s) (.insv/.mov/.mp4) in {self.work_dir}")
 
     def current_left_path(self) -> Path:
         return self.work_dir / self.left_combo.currentText()
@@ -1429,17 +1454,24 @@ class MainWindow(QMainWindow):
             if left == right:
                 raise ToolError("Left and right files must be different.")
 
-            source_mode = source_mode_for_pair(left, right)
+            preview_left, preview_right, source_mode, using_lrv = resolve_preview_sources(left, right)
 
             self.left_info = ffprobe_video_info(left)
             self.right_info = ffprobe_video_info(right)
             fps = min(self.left_info.fps, self.right_info.fps) or DEFAULT_FPS
             self.fps_box.setValue(fps)
 
+            if using_lrv:
+                self.log_msg(
+                    f"Using LRV preview proxies: {preview_left.name} / {preview_right.name} (render/scripts stay on INSV)."
+                )
+            else:
+                self.log_msg("No matching LRV pair found; preview uses the selected source files.")
+
             preview_dir = self.work_dir / ".maud_preview"
             preview_targets = {
                 "left": preview_dir / build_preview_dir_name(
-                    left,
+                    preview_left,
                     self.preview_seconds_box.value(),
                     self.preview_height_box.value(),
                     self.left_fov_box.value(),
@@ -1448,7 +1480,7 @@ class MainWindow(QMainWindow):
                     self.season_start_box.value(),
                 ),
                 "right": preview_dir / build_preview_dir_name(
-                    right,
+                    preview_right,
                     self.preview_seconds_box.value(),
                     self.preview_height_box.value(),
                     self.right_fov_box.value(),
@@ -1486,7 +1518,7 @@ class MainWindow(QMainWindow):
             self.preview_queue = [
                 {
                     "side": "left",
-                    "src": left,
+                    "src": preview_left,
                     "out_dir": preview_targets["left"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
@@ -1498,7 +1530,7 @@ class MainWindow(QMainWindow):
                 },
                 {
                     "side": "right",
-                    "src": right,
+                    "src": preview_right,
                     "out_dir": preview_targets["right"],
                     "preview_seconds": preview_seconds,
                     "preview_height": preview_height,
