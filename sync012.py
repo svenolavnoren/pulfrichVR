@@ -304,8 +304,9 @@ def build_preview_command(
         )
     elif source_mode == "packed":
         filter_graph = (
-            f"[0:v:0]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
-            f"scale=-2:{preview_height}[v]"
+            f"{build_packed_dualfisheye_reorder('[0:v:0]', 'df')};"
+            f"[df]v360=dfisheye:e:ih_fov={fov}:iv_fov={fov}:yaw={yaw},"
+            f"scale=-2:{preview_height}[v]"                                               
         )
     else:
         filter_graph = f"[0:v:0]scale=-2:{preview_height}[v]"
@@ -465,6 +466,14 @@ def build_flat_tb_graph(
     )
 
 
+def build_packed_dualfisheye_reorder(input_label: str, output_label: str) -> str:
+    return (
+        f"{input_label}crop='iw/2':ih:'iw/2':0[{output_label}r]; "
+        f"{input_label}crop='iw/2':ih:0:0[{output_label}l]; "
+        f"[{output_label}l][{output_label}r]hstack[{output_label}]" #20260322 l and r swithced by S-O N
+    )
+
+
 def build_image_script_text(
     left_file: Path,
     right_file: Path,
@@ -508,9 +517,11 @@ def build_image_script_text(
         )
     elif source_mode == "packed":
         filter_graph = (
-            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfL]; "
+            f"[0:v:0]select='eq(n,{left_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfL0]; "
+            f"{build_packed_dualfisheye_reorder('[dfL0]', 'dfL')}; "
             f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
-            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfR]; "
+            f"[1:v:0]select='eq(n,{right_frame_index})',setpts=PTS-STARTPTS,format=rgb24[dfR0]; "
+            f"{build_packed_dualfisheye_reorder('[dfR0]', 'dfR')}; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -625,9 +636,11 @@ def build_fast_batch_image_dump_script_text(
         )
     elif source_mode == "packed":
         filter_graph = (
-            "[0:v:0]format=rgb24[dfL]; "
+            "[0:v:0]format=rgb24[dfL0]; "
+            f"{build_packed_dualfisheye_reorder('[dfL0]', 'dfL')}; "
             f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
-            "[1:v:0]format=rgb24[dfR]; "
+            "[1:v:0]format=rgb24[dfR0]; "
+            f"{build_packed_dualfisheye_reorder('[dfR0]', 'dfR')}; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -732,9 +745,11 @@ def build_batch_image_dump_script_text(
         )
     elif source_mode == "packed":
         filter_graph = (
-            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfL]; "
+            "[0:v:0]select='eq(n,'$LEFT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfL0]; "
+            f"{build_packed_dualfisheye_reorder('[dfL0]', 'dfL')}; "
             f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
-            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfR]; "
+            "[1:v:0]select='eq(n,'$RIGHT_FRAME')',setpts=PTS-STARTPTS,format=rgb24[dfR0]; "
+            f"{build_packed_dualfisheye_reorder('[dfR0]', 'dfR')}; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
@@ -862,9 +877,11 @@ def build_ffmpeg_script_text(
         )
     elif source_mode == "packed":
         video_graph = (
-            f"[0:v:0]{left_trim_v0}format=rgb24[dfL]; "
+            f"[0:v:0]{left_trim_v0}format=rgb24[dfL0]; "
+            f"{build_packed_dualfisheye_reorder('[dfL0]', 'dfL')}; "
             f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
-            f"[1:v:0]{right_trim_v0}format=rgb24[dfR]; "
+            f"[1:v:0]{right_trim_v0}format=rgb24[dfR0]; "
+            f"{build_packed_dualfisheye_reorder('[dfR0]', 'dfR')}; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
             "[lv12]crop='iw/2':ih:'iw/4':0[r23]; "
