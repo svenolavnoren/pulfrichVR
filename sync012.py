@@ -470,8 +470,8 @@ def build_packed_dualfisheye_reorder(input_label: str, output_label: str) -> str
     return (
         f"{input_label}crop='iw/2':ih:'iw/2':0[{output_label}r]; "
         f"{input_label}crop='iw/2':ih:0:0[{output_label}l]; "
-        f"[{output_label}l][{output_label}r]hstack[{output_label}]" #20260322 l and r swithced by S-O N
-    )
+        f"[{output_label}r][{output_label}l]hstack[{output_label}]" #20260322 l and r swithced by S-O N
+    )                                                               #20260323 l and r swithced back by S-O N
 
 
 def build_image_script_text(

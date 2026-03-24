@@ -1,0 +1,405 @@
+chatfönster ca 20260320 
+
+Har redigerat bort det som hade med mitt repo att göra (puh) och behållit det som rörde den aktuella detajen i projektet. 
+Utan att spolia helt, tl/dr: Så här såg det ut när vi tillsammans hittade en sak som legat och gömt sig i dagsljus och som visar sig vara ett riktigt fynd.
+
+<svenolav>
+nästa sak jag vill göra är att spåna lite mer kring video - seek och om vi är klara där eller om det finns något mer intressant värt att testa.
+</svenolav>
+
+<chatgpt 5.4 codex>
+.....
+Om video-seek: är vi klara där eller finns mer att testa?
+Kort svar
+
+Nej, jag tror inte vi är helt klara där.
+Jag tror däremot att ni redan har falsifierat en viktig idé:
+
+    “sampla glesare med -r 1 så blir det dramatiskt snabbare”
+
+    vilket inte verkade ge den praktiska wow-effekt man hoppades på
+
+Det är värdefull kunskap i sig.
+Min nuvarande tolkning
+
+Det talar för att flaskhalsen inte främst var hur många preview-bilder som sparas ut, utan att ffmpeg fortfarande måste:
+
+    läsa,
+
+    söka,
+
+    och i praktiken dekoda sig fram
+
+för att nå rätt exakta bildruta.
+Så vad återstår som intressant att testa?
+
+Jag tycker att följande spår fortfarande låter intressanta:
+1. Keyframe/grovseek + exakt lokalseek
+
+Alltså tvåstegstänk:
+
+    hoppa grovt till ungefär rätt område
+
+    bygg sedan ett litet exakt window därifrån
+
+Det är lite besläktat med det ni redan nosat på, men här mer som intern teknik än som stort UI-koncept.
+2. Proxy eller mellanformat
+
+Det står redan i projektinventeringen att andra prestandavinklar också kan vara relevanta, inte bara seek.
+
+Om originalen är tunga kan ett test vara:
+
+    lägre upplöst mellanfil
+
+    eller mer seekvänligt codec/format
+
+    för navigering och frameval
+
+    medan slutexport fortfarande sker från original
+
+Det stora kravet är förstås att:
+
+    preview-frame måste motsvara slutframe exakt
+
+så det måste göras utan att tappa frameidentitet.
+3. Permanent preview-cache per klipp
+
+Ni har redan ett bra “just works”-läge nu. Ett vidare steg kan vara att göra det ännu snålare med omrendering:
+
+    när ett window redan finns, återanvänd det alltid
+
+    rendera bara om när verkliga parametrar ändras
+
+    aldrig på grund av fel knapptryck
+
+Det ligger väldigt nära det Arne redan uppskattar.
+4. Mindre ffmpeg, mer smart UI
+
+Det är möjligt att nästa stora vinst inte är “snabbare ffmpeg”, utan:
+
+    färre tillfällen då ffmpeg alls behöver jobba
+
+    bättre återanvändning
+
+    och färre handlingar som råkar trigga ny preview
+
+Det du just bad om — att eliminera omrenderingsrisken — är exakt ett sådant steg.
+Min känsla: vad som verkar minst lovande just nu
+
+Det som låter minst lovande att lägga energi på direkt är att hoppas på att:
+
+    enkel sampling (-r 1)
+
+    eller liknande rak ffmpeg-flagga
+
+ska trolla bort seekproblemet på egen hand.
+
+Det testet känns i praktiken redan ganska avklarat.
+Min rekommenderade nästa ordning
+
+Jag skulle själv göra så här:
+1. Bestäm om sync011.py ska bort helt
+
+Om ja:
+
+    radera den rent med git rm
+
+    commit
+
+    push
+
+2. Behåll nuvarande fungerande sync012.py-läge som “arbetssanning”
+
+Det verkar ha gett Arne en riktig användbarhetsvinst.
+3. Nästa seek-runda = små, mätbara experiment
+
+Inte ny stor omskrivning, utan ett test i taget, t.ex.:
+
+    går det att återanvända cache ännu bättre?
+
+    går det att dela upp grov- och finseek?
+
+    går det att få proxy-navigering utan att tappa exakt frame-match?
+
+Min sammanfattning
+.....
+Om seek-frågan
+
+Nej, jag tror inte vi är färdiga där.
+Men:
+
+    ni har redan lärt er något viktigt,
+
+    och nästa steg bör nog vara små smarta seek-/cache-experiment snarare än stora konceptskiften.
+
+Kommandon jag använde
+
+    ✅ git status --short --branch
+
+    ✅ rg --files | rg '^(sync011.py|sync012.py|projektinventering_20260319.txt)$'
+
+    ✅ git log --oneline --decorate -n 8 --all
+
+    ✅ nl -ba projektinventering_20260319.txt | sed -n '9,14p'
+</chatgpt 5.4 codex>
+<svenolav>
+jag kom på en sak när jag följde ditt resonemang, lrv!? allså de insta360-filerna som alltid finns parvis med insv och som jag tycker ligger där och "skräpar ner" lite. helt klart värt ett försök att prova med en sån som potentiellt seek-guld. det jag befarar är att de inte ligger i perfekt synk men vi får kolla närmare på det. så jag föreslår att vi börjar där om inte du hade nån annan snabb sak vi kan kolla innan.
+</svenolav>
+<chatgpt 5.4 codex>
+Ja — jag tycker LRV är det mest intressanta nästa spåret
+
+Det låter faktiskt som ett väldigt bra nästa försök.
+
+Skälet är enkelt: er att-göra-punkt handlar uttryckligen om att hitta prestandavinster i just 24 fps / 8k / dubbelkamera-material för stillbilder, där seek känns som flaskhalsen. Ett lågupplöst proxyspår som redan följer med kamerafilerna är därför nästan definitionen av något som kan vara “seek-guld” om det visar sig vara tillräckligt väl linjerat mot originalet.
+Min bedömning
+Det här är troligen bästa nästa testet
+
+Före fler större kodidéer skulle jag absolut prioritera:
+
+    kan LRV användas för preview/navigering
+
+    medan
+
+    INSV fortfarande används för slutlig exakt export
+
+Det är den kombinationen som känns mest lovande.
+Den riktiga nyckelfrågan
+
+Du satte fingret på exakt rätt risk:
+
+    är LRV i perfekt sync med INSV?
+
+Det är den avgörande frågan.
+Om svaret är ja
+
+Då kan LRV bli en väldigt stark preview-källa:
+
+    snabbare seek
+
+    snabbare decode
+
+    mindre väntan
+
+    fortfarande exakt slutexport från original
+
+Om svaret är nästan ja, men med konstant offset
+
+Då är det fortfarande intressant.
+En fast, mätbar offset går ofta att leva med eller kompensera för.
+Om svaret är nej, glider över tid
+
+Då blir det mycket mindre användbart för exakt frameval.
+Min rekommenderade ordning
+
+Jag skulle börja med ett rent undersökningstest, inte kod direkt.
+Test 1 — metadatajämförelse
+
+Kolla för ett INSV/LRV-par:
+
+    fps
+
+    duration
+
+    frame count
+
+    time base / start time om tillgängligt
+
+Om de matchar snyggt är det ett väldigt bra tecken.
+Test 2 — visuell synckontroll
+
+Jämför några punkter:
+
+    första tydliga frame
+
+    någon punkt i mitten
+
+    någon punkt nära slutet
+
+Syftet är att se om:
+
+    LRV och INSV verkar starta lika
+
+    och om de håller sig i fas
+
+Test 3 — praktisk användbarhet
+
+Om det ser lovande ut:
+
+    prova LRV som previewkälla
+
+    men exportera fortfarande från INSV
+
+    kontrollera att den valda framen verkligen blir samma slutframe
+
+Det är där guldet finns.
+Varför jag gillar det här bättre än flera andra idéer just nu
+
+Ni har redan lärt er något viktigt:
+
+    att enkel gles sampling inte gav den stora wow-effekten ni hoppades på
+
+Så nästa smarta steg är inte nödvändigtvis ännu en ffmpeg-flagga, utan att testa om kameran redan har gett er ett inbyggt proxyspår.
+
+Det är ofta exakt sådant som ger verklig fart i praktiken.
+Min hypotes
+
+Min spontana hypotes är:
+bästa möjliga utfall
+
+    LRV är nära nog identisk i timing
+
+    seek/previews blir mycket snabbare
+
+    sync012.py kan senare få:
+
+        LRV för preview
+
+        INSV för render/export
+
+trolig mellanvariant
+
+    LRV har liten men stabil offset
+
+    fortfarande användbart, men kräver kalibrering eller kompensation
+
+sämsta utfall
+
+    LRV glider eller beter sig för annorlunda
+
+    då är det inte värt att bygga vidare på
+
+Men jag håller med dig: det är absolut värt ett försök.
+Min rekommendation i en mening
+Ja — jag tycker att vi ska börja där.
+
+Det är det mest lovande snabba testet innan vi lägger mer energi på andra seek-idéer.
+Om du vill ha min praktiska nästa-plan
+
+Jag skulle göra det i denna ordning:
+
+    välj ett konkret INSV/LRV-exempelpar
+
+    jämför metadata
+
+    jämför några tydliga frames visuellt
+
+    bedöm om det är:
+
+        perfekt,
+
+        konstant offset,
+
+        eller glidande fel
+
+    först därefter avgör vi om kodändring är värd att göra
+
+Det tror jag är den mest energisnåla och kloka vägen.
+Underlag jag använde
+
+    Projektets att-göra-punkt om prestanda/seek för dubbelkamera-stillbilder.
+
+Kommandon jag använde
+
+    ✅ nl -ba projektinventering_20260319.txt | sed -n '11,12p'
+
+    ✅ rg -n "\\bLRV\\b|\\blrv\\b" -S sync011.py sync012.py projektinventering_20260319.txt
+</chatgpt 5.4 codex>
+<svenolav>
+nu ska vi se om vi lyckas bråka igenom filöppningen av lrv. 
+för att appen nu ska hitta filen så att detta funkgade genom att ändra lite i filnamnet: LRV -> VID i början samt .lrv -> INSV på slutet så ser vi den.
+nästa steg säger den så här:
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '/home/sven-olav/Video/home3d/VID_20260316_102430_01_031lrv.insv':
+  Metadata:
+    major_brand     : avc1
+    minor_version   : 538182144
+    compatible_brands: avc1isom
+    creation_time   : 2026-03-16T08:24:30.000000Z
+  Duration: 00:02:26.96, start: 0.000000, bitrate: 9228 kb/s
+  Stream #0:0[0x1](eng): Video: h264 (High) (avc1 / 0x31637661), yuvj420p(pc, bt709, progressive), 1664x832 [SAR 1:1 DAR 2:1], 8008 kb/s, 24 fps, 24 tbr, 24k tbn (default)
+    Metadata:
+      creation_time   : 2026-03-16T08:24:30.000000Z
+      handler_name    : ?INS.AVC
+      encoder         : AVC encoder
+  Stream #0:1[0x2](eng): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 189 kb/s (default)
+    Metadata:
+      creation_time   : 2026-03-16T08:24:30.000000Z
+      handler_name    : ?INS.AAC
+[fc#0 @ 0x62d81850b040] Stream specifier ':v:1' in filtergraph description [0:v:0][0:v:1]hstack[df];[df]v360=dfisheye:e:ih_fov=199.0:iv_fov=199.0:yaw=180.0,scale=-2:1200[v] matches no streams.
+Error binding filtergraph inputs/outputs: Invalid argument
+
+vilket jag tolkar som att den är enkanlig 2*1 istället för tvåkanalig med två 1*1. jag har inte kikat nu på bilden men är hyfsat säker på att geometrin ser likadan ut som insv gör, kamerans native dubbelt fisköga. kan dubbelkolla närmare med ffprobe, optiskt eller på något annat sätt vid behov om vi inte vill gissa. Det jag ber dig om nu, om du inte vill checka nåt först: inför stöd för lrv i filöppningen. eventuellt "native-stöd" så att jag slipper döpa om manuellt kan vänta men osyligt stöd tycker jag kan få finnas som hidden feature oavsett, om det skulle visa sig att det funkar att öppna en sån här fil. upplösningen ser nästan tillräcklig ut för previewen men jag förväntar mig att det kommer kännas fulare än arne är van vid och vi får se om han tycker det är dugligt (om vi får det att visas).
+</svenolav>
+<chatgpt 5.4 codex>
+Summary
+
+    Added LRV-aware source detection so the app now distinguishes among dual-stream INSV, packed single-stream fisheye proxies, and flat MOV/MP4-style inputs. .lrv files are now recognized directly, and renamed single-stream .insv files also fall into the packed mode instead of the old broken dual-stream assumption.
+
+    Updated preview caching and preview-command generation to carry a source_mode instead of a simple INSV/flat boolean, and added a packed-source preview path that runs v360=dfisheye:e directly on a single video stream. That is the key change for opening the LRV-style files you just tested.
+
+    Extended still-image, jpg-dump, and video-script generation so packed LRV sources go through the same dual-fisheye-to-equirect logic as INSV, just without requiring a nonexistent v:1 stream.
+
+    Exposed native .lrv file discovery in the file picker and threaded the detected source_mode through preview building and later script generation, so this can work both as a hidden feature for renamed files and as direct support for real .lrv files.
+
+Testing
+
+    ✅ python -m py_compile sync012.py
+
+    ✅ python - <<'PY' from pathlib import Path import ast ast.parse(Path('sync012.py').read_text()) print('ast ok') PY
+
+    ✅ git diff --check
+
+    ⚠️ Screenshot not included because the browser/screenshot tool was not available in this environment.
+
+    ✅ git commit --amend --no-edit
+</chatgpt 5.4 codex>
+
+<svenolav>
+........
+preview blev revolutionerande bra, en uppsnabbning på kanske 20x. reflektion är att det ger ytterligare stöd för hypotesen att seek är vad som tar nästan all tid, eftersom 20x rimmar väl med skillnaden i filstorlek mellan INSV och LRV. Upplösningen är till min glädje tillräckligt bra för redigering (Arne reagerade inte). Det som den prompten med facit i hand saknar är mer vägledning för är hur "omgivningen" ska bete sig när Arne gett oss denna lyx genom att kopiera rubbet från kameran istället för att handplocka insv för att hans externa arkiv ska räcka 5% längre vilket blir ju blir flera dar på ett år. Respekt för Arne och tragikomisk aspb. 
+Jag tänker nu så här:
+LRV ska ske automatiskt om det råkar finnas, annars gör appen precis som förut, innan vi började med LRV.
+Vad vill vi sker då:
+Efter "Open Video" och när INSV valts skannar vi efter LRV.
+Vi kan då förlita oss då på det här mönstret: (mönstret är "sant" för samtliga videor från alla mina tre insta360-kameror. andra märken och gamla insta360-kamoror gör annorlunda men det tillåter vi oss att förbise nu.)  
+VID_20260316_092956_00_009.insv
+LRV_20260316_092956_01_009.lrv 
+
+vi behöver alltså hålla tungan rätt i mun när det gäller filtergraferna. i förra experimentet åkte LRV-formatet med även till "produktionen" dvs till .sh. där ska det ske "som vanligt" så att vi får INSV för .sh. LRV-formatet ska vi använda i enbart för det som har med preview att göra, men inte för någon annan output.
+
+ett olöst ministrul som jag väntat med att försöka lösa är filnamnet i "stem". tidigare har vi där ganska nyligen implementerat L00001, men den beter sig lite intermittent konstigt. inte värt att fördjupa sig i nu, men jag nämner det, då den detajen såg ut att blivit nuddad vid vårt första försök.
+
+behöver du mer info t ex om du vill se koddelar som gick bra så hojta. 
+du får gärna den här gången kan skapa koden enbart mot sync012.py och aktivt skippa den numera pensionerade sync011.py och sync010.py, om det är möjligt.
+</svenolav>
+
+<chatgpt 5.4 codex>
+Summary
+
+    Added automatic LRV proxy detection in sync012.py only: for selected INSV files, the app now extracts an Insta capture key, looks for matching LRV_<stamp>_*_<clip>.lrv files, and resolves preview inputs from those proxies when both sides are available. If no matching pair exists, it falls back to the original selected files.
+
+    Changed the file picker back to showing only the normal source files (.insv/.mov/.mp4), so Arne keeps selecting the sharp/original inputs while LRV stays an internal preview optimization instead of cluttering the UI.
+
+    Updated preview building to use the resolved preview sources (preview_left / preview_right) and to log clearly whether LRV proxies are being used, while still computing sync FPS and the rest of the workflow from the original selected files.
+
+    Left production output paths alone: image, dump, and video script generation still use current_left_path() / current_right_path() and therefore continue targeting the originally selected files rather than the LRV proxies. That keeps LRV strictly preview-only, as requested.
+
+Testing
+
+    ✅ python -m py_compile sync012.py
+
+    ✅ python - <<'PY' from pathlib import Path import ast ast.parse(Path('sync012.py').read_text()) print('ast ok') PY
+
+    ✅ git diff --check
+
+    ⚠️ Screenshot not included because the browser/screenshot tool was not available in this environment.
+
+    ✅ git commit -m "Auto-use LRV files for preview only"
+
+
+</chatgpt 5.4 codex>
+<svenolav>
+.....
+arne och jag testar här i 20 min och ger med beröm godkännt. har checkat synken noga på en bild via .sh och det såg exakt ut. mätte preview med väggklocka och det såg ut som knappt 50s för 3500+4000 frames. slide-funktionen och den supersnabba skrollningen med jpg på plats gör att redigerandet känns lätt. kul att du grejar att fixa ihop funktionaliteten så bra utan omtag. två minibuggar .....
+.....
+</svenolav>
+
