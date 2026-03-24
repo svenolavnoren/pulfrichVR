@@ -44,8 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QProcess, Qt
-from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import QProcess, Qt, Signal
+from PySide6.QtGui import QAction, QImage, QKeySequence, QLinearGradient, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -62,6 +62,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QSlider,
+    QStyle,
+    QStyleOptionSlider,
+    QStylePainter,
     QSpinBox,
     QDoubleSpinBox,
     QVBoxLayout,
@@ -834,9 +837,28 @@ def build_ffmpeg_script_text(
     test_seconds: int,
     include_test_duration: bool,
     source_mode: str,
+    clip_start_frame: Optional[int] = None,
+    clip_end_frame: Optional[int] = None,
 ) -> str:
     trim_seconds = abs(offset_frames) / max(fps, 0.001)
     trim_str = f"{trim_seconds:.6f}"
+    clip_enabled = clip_start_frame is not None and clip_end_frame is not None and clip_end_frame >= clip_start_frame
+
+    left_clip_prefix = ""
+    right_clip_prefix = ""
+    left_clip_a = ""
+    right_clip_a = ""
+    clip_duration_frames = 0
+    if clip_enabled:
+        left_start = int(clip_start_frame)
+        left_end = int(clip_end_frame) + 1
+        right_start = left_start + offset_frames
+        right_end = left_end + offset_frames
+        clip_duration_frames = left_end - left_start
+        left_clip_prefix = f"trim=start_frame={left_start}:end_frame={left_end},setpts=PTS-STARTPTS,"
+        right_clip_prefix = f"trim=start_frame={right_start}:end_frame={right_end},setpts=PTS-STARTPTS,"
+        left_clip_a = f",atrim=start={left_start / max(fps, 0.001):.6f}:end={left_end / max(fps, 0.001):.6f},asetpts=PTS-STARTPTS"
+        right_clip_a = f",atrim=start={right_start / max(fps, 0.001):.6f}:end={right_end / max(fps, 0.001):.6f},asetpts=PTS-STARTPTS"
 
     if offset_frames >= 0:
         right_trim_v0 = f"trim=start={trim_str},setpts=PTS-STARTPTS,"
@@ -857,12 +879,12 @@ def build_ffmpeg_script_text(
 
     if source_mode == "insv":
         video_graph = (
-            f"[0:v:0]{left_trim_v0}format=rgb24[f0a]; "
-            f"[0:v:1]{left_trim_v1}format=rgb24[f0b]; "
+            f"[0:v:0]{left_clip_prefix}{left_trim_v0}format=rgb24[f0a]; "
+            f"[0:v:1]{left_clip_prefix}{left_trim_v1}format=rgb24[f0b]; "
             "[f0a][f0b]hstack[dfL]; "
             f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
-            f"[1:v:0]{right_trim_v0}format=rgb24[g0a]; "
-            f"[1:v:1]{right_trim_v1}format=rgb24[g0b]; "
+            f"[1:v:0]{right_clip_prefix}{right_trim_v0}format=rgb24[g0a]; "
+            f"[1:v:1]{right_clip_prefix}{right_trim_v1}format=rgb24[g0b]; "
             "[g0a][g0b]hstack[dfR]; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
@@ -877,10 +899,10 @@ def build_ffmpeg_script_text(
         )
     elif source_mode == "packed":
         video_graph = (
-            f"[0:v:0]{left_trim_v0}format=rgb24[dfL0]; "
+            f"[0:v:0]{left_clip_prefix}{left_trim_v0}format=rgb24[dfL0]; "
             f"{build_packed_dualfisheye_reorder('[dfL0]', 'dfL')}; "
             f"[dfL]v360=dfisheye:e:ih_fov={fov_left}:iv_fov={fov_left}:yaw={yaw_left}:pitch=0:roll=0,split=3[lv0][lv12][lv3]; "
-            f"[1:v:0]{right_trim_v0}format=rgb24[dfR0]; "
+            f"[1:v:0]{right_clip_prefix}{right_trim_v0}format=rgb24[dfR0]; "
             f"{build_packed_dualfisheye_reorder('[dfR0]', 'dfR')}; "
             f"[dfR]v360=dfisheye:e:ih_fov={fov_right}:iv_fov={fov_right}:yaw={yaw_right}:pitch=0:roll=0,split=3[rv0][rv12][rv3]; "
             "[lv0]crop='iw/4':ih:0:0[r1]; "
@@ -895,8 +917,8 @@ def build_ffmpeg_script_text(
         )
     else:
         video_graph = build_flat_tb_graph(
-            left_chain=f"{left_trim_v0}null".rstrip(","),
-            right_chain=f"{right_trim_v0}null".rstrip(","),
+            left_chain=f"{left_clip_prefix}{left_trim_v0}null".rstrip(","),
+            right_chain=f"{right_clip_prefix}{right_trim_v0}null".rstrip(","),
             target_res=target_res,
             use_rgb24=True,
         )
@@ -905,8 +927,8 @@ def build_ffmpeg_script_text(
     audio_map = ""
     if source_mode in {"insv", "packed"}:
         audio_filter = (
-            f"[0:a]pan=mono|c0=c0{left_trim_a}[a0]; "
-            f"[1:a]pan=mono|c0=c0{right_trim_a}[a1]; "
+            f"[0:a]pan=mono|c0=c0{left_clip_a}{left_trim_a}[a0]; "
+            f"[1:a]pan=mono|c0=c0{right_clip_a}{right_trim_a}[a1]; "
             "[a0][a1]join=inputs=2:channel_layout=stereo[a]"
         )
         audio_map = ' -map "[a]"'
@@ -923,6 +945,7 @@ set -euo pipefail
 # FPS used for sync: {fps:.6f}
 # Offset (frames): {offset_frames}
 # Offset (seconds): {trim_str}
+# Clip range (left absolute frame): {"full source" if not clip_enabled else f"{clip_start_frame}..{clip_end_frame}"}
 
 LEFT_FILE={shell_quote(left_file.name)}
 RIGHT_FILE={shell_quote(right_file.name)}
@@ -941,6 +964,10 @@ YAW_RIGHT={yaw_right}
 FPS_SYNC={fps:.6f}
 OFFSET_FRAMES={offset_frames}
 OFFSET_SECONDS={trim_str}
+CLIP_ENABLED={1 if clip_enabled else 0}
+CLIP_START_FRAME={clip_start_frame if clip_enabled else 0}
+CLIP_END_FRAME={clip_end_frame if clip_enabled else 0}
+CLIP_DURATION_FRAMES={clip_duration_frames}
 
 # Derived source geometry per eye after v360 equirect.
 # Expected common case:
@@ -969,6 +996,61 @@ ffmpeg -hide_banner \
     return lines
 
 
+class RangeSlider(QSlider):
+    markerRequested = Signal(int)
+
+    def __init__(self, orientation, parent=None) -> None:
+        super().__init__(orientation, parent)
+        self.range_start = 0
+        self.range_end = 0
+
+    def set_marked_range(self, start: int, end: int) -> None:
+        lo, hi = sorted((max(self.minimum(), start), min(self.maximum(), end)))
+        self.range_start = lo
+        self.range_end = hi
+        self.update()
+
+    def _pixel_value_from_pos(self, x: int) -> int:
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
+        handle = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        pos = min(max(0, x - groove.left() - handle.width() // 2), span)
+        return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), pos, span)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.RightButton:
+            self.markerRequested.emit(self._pixel_value_from_pos(int(event.position().x())))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QStylePainter(self)
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
+        if groove.width() > 0 and self.maximum() > self.minimum():
+            start_ratio = (self.range_start - self.minimum()) / max(1, (self.maximum() - self.minimum()))
+            end_ratio = (self.range_end - self.minimum()) / max(1, (self.maximum() - self.minimum()))
+            x1 = groove.left() + int(start_ratio * groove.width())
+            x2 = groove.left() + int(end_ratio * groove.width())
+            grad = QLinearGradient(groove.left(), groove.top(), groove.right(), groove.top())
+            grad.setColorAt(0.0, Qt.red)
+            grad.setColorAt(max(0.0, min(1.0, start_ratio)), Qt.red)
+            grad.setColorAt(max(0.0, min(1.0, start_ratio + 0.001)), Qt.darkGreen)
+            grad.setColorAt(max(0.0, min(1.0, end_ratio)), Qt.darkGreen)
+            grad.setColorAt(max(0.0, min(1.0, end_ratio + 0.001)), Qt.red)
+            grad.setColorAt(1.0, Qt.red)
+            painter.fillRect(groove.adjusted(0, 2, 0, -2), grad)
+            painter.setPen(Qt.black)
+            painter.drawLine(x1, groove.top(), x1, groove.bottom())
+            painter.drawLine(x2, groove.top(), x2, groove.bottom())
+        opt.subControls = QStyle.SC_SliderHandle | QStyle.SC_SliderTickmarks
+        painter.drawComplexControl(QStyle.CC_Slider, opt)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -985,6 +1067,8 @@ class MainWindow(QMainWindow):
         self.preview_queue: list[dict[str, object]] = []
         self.current_preview_job: Optional[dict[str, object]] = None
         self.preview_expected_frames = 0
+        self.range_start_frame = 0
+        self.range_end_frame = 0
 
         self._build_ui()
         self.load_settings()
@@ -1112,10 +1196,18 @@ class MainWindow(QMainWindow):
         self.offset_label = QLabel("Offset: 0 frames (0.000000 s)")
         self.offset_label.setStyleSheet("font-weight:bold;")
         self.absolute_label = QLabel("Absolute frames: L 0, R 0")
-        self.window_slider = QSlider(Qt.Horizontal)
+        self.window_slider = RangeSlider(Qt.Horizontal)
         self.window_slider.setRange(0, 0)
         self.window_slider.valueChanged.connect(self.on_window_slider_changed)
+        self.window_slider.markerRequested.connect(self.on_slider_marker_requested)
         self.window_slider_label = QLabel("Window frame: 0 / 0")
+        self.range_label = QLabel("Range: full window")
+        btn_set_start = QPushButton("Set t-start")
+        btn_set_end = QPushButton("Set t-end")
+        btn_reset_range = QPushButton("Reset range")
+        btn_set_start.clicked.connect(self.set_range_start_at_cursor)
+        btn_set_end.clicked.connect(self.set_range_end_at_cursor)
+        btn_reset_range.clicked.connect(self.reset_range_to_full)
 
         controls_layout.addWidget(QLabel("FPS:"), 0, 0)
         controls_layout.addWidget(self.fps_box, 0, 1)
@@ -1133,14 +1225,18 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(btn_r_prev, 2, 2)
         controls_layout.addWidget(btn_r_next, 2, 3)
 
-        controls_layout.addWidget(self.window_slider_label, 3, 0, 1, 5)
+        controls_layout.addWidget(self.range_label, 3, 0, 1, 5)
+        controls_layout.addWidget(self.window_slider_label, 4, 0, 1, 5)
 
-        controls_layout.addWidget(QLabel("Slide:"), 4, 0)
-        controls_layout.addWidget(self.window_slider, 4, 1, 1, 4)
-        controls_layout.addWidget(btn_both_prev, 5, 2)
-        controls_layout.addWidget(btn_both_next, 5, 3)
-        controls_layout.addWidget(self.offset_label, 5, 0, 1, 2)
-        controls_layout.addWidget(self.absolute_label, 6, 0, 1, 5)
+        controls_layout.addWidget(QLabel("Timeline:"), 5, 0)
+        controls_layout.addWidget(self.window_slider, 5, 1, 1, 4)
+        controls_layout.addWidget(btn_set_start, 6, 1)
+        controls_layout.addWidget(btn_set_end, 6, 2)
+        controls_layout.addWidget(btn_reset_range, 6, 3)
+        controls_layout.addWidget(btn_both_prev, 7, 2)
+        controls_layout.addWidget(btn_both_next, 7, 3)
+        controls_layout.addWidget(self.offset_label, 7, 0, 1, 2)
+        controls_layout.addWidget(self.absolute_label, 8, 0, 1, 5)
 
         gen = QGroupBox("Generate script")
         right_layout.addWidget(gen)
@@ -1367,6 +1463,7 @@ class MainWindow(QMainWindow):
             self.window_slider.setRange(0, max(0, self.left_preview.frame_count - 1) if self.left_preview else 0)
             self.window_slider.setValue(0)
             self.window_slider.blockSignals(False)
+            self.reset_range_to_full(log_change=False)
             self.fill_output_name()
             self.refresh_previews()
             if self.left_preview and self.right_preview:
@@ -1531,6 +1628,7 @@ class MainWindow(QMainWindow):
             self.window_slider.setRange(0, 0)
             self.window_slider.setValue(0)
             self.window_slider.blockSignals(False)
+            self.reset_range_to_full(log_change=False)
 
             self.preview_queue = [
                 {
@@ -1579,6 +1677,39 @@ class MainWindow(QMainWindow):
         self.right_frame_box.setValue(
             max(0, min(self.right_frame_box.maximum(), current_right + delta))
         )
+
+    def set_range_start_at_cursor(self) -> None:
+        self.set_range_bound("start", self.left_frame_box.value())
+
+    def set_range_end_at_cursor(self) -> None:
+        self.set_range_bound("end", self.left_frame_box.value())
+
+    def reset_range_to_full(self, log_change: bool = True) -> None:
+        self.range_start_frame = self.window_slider.minimum()
+        self.range_end_frame = self.window_slider.maximum()
+        self.window_slider.set_marked_range(self.range_start_frame, self.range_end_frame)
+        if log_change:
+            self.log_msg("Range reset to full preview window.")
+        self.update_offset_label()
+
+    def set_range_bound(self, bound: str, value: int) -> None:
+        value = max(self.window_slider.minimum(), min(self.window_slider.maximum(), value))
+        if bound == "start":
+            self.range_start_frame = min(value, self.range_end_frame)
+        else:
+            self.range_end_frame = max(value, self.range_start_frame)
+        self.window_slider.set_marked_range(self.range_start_frame, self.range_end_frame)
+        self.update_offset_label()
+        self.log_msg(f"Range set: t-start={self.range_start_frame}, t-end={self.range_end_frame} (local preview frames).")
+
+    def on_slider_marker_requested(self, value: int) -> None:
+        # One-click variant: right click sets whichever bound is nearest.
+        dist_start = abs(value - self.range_start_frame)
+        dist_end = abs(value - self.range_end_frame)
+        if dist_start <= dist_end:
+            self.set_range_bound("start", value)
+        else:
+            self.set_range_bound("end", value)
 
     def bump_frame(self, side: str, delta: int) -> None:
         if side == "left":
@@ -1657,6 +1788,12 @@ class MainWindow(QMainWindow):
         self.preview_scope_label.setText(f"Window start: {self.season_start_box.value():.3f} s")
         self.window_slider_label.setText(
             f"Window frame: {self.left_frame_box.value()} / {self.left_frame_box.maximum()}"
+        )
+        range_frames = max(0, self.range_end_frame - self.range_start_frame + 1)
+        range_seconds = range_frames / max(self.fps_box.value(), 0.001)
+        self.range_label.setText(
+            f"Range: t-start {self.range_start_frame}, t-end {self.range_end_frame} "
+            f"({range_frames} frames, {range_seconds:.3f}s)"
         )
 
     def fill_output_name(self) -> None:
@@ -1815,6 +1952,19 @@ class MainWindow(QMainWindow):
             script_name = f"{stem}.sh"
             mp4_name = f"{stem}.mp4"
             script_path = self.work_dir / script_name
+            clip_start_abs: Optional[int] = None
+            clip_end_abs: Optional[int] = None
+            if self.left_preview is not None and self.right_preview is not None:
+                left_start_local = self.range_start_frame
+                left_end_local = self.range_end_frame
+                right_start_local = left_start_local + (self.right_frame_box.value() - self.left_frame_box.value())
+                right_end_local = left_end_local + (self.right_frame_box.value() - self.left_frame_box.value())
+                if right_start_local < 0 or right_end_local > self.right_preview.frame_count - 1:
+                    raise ToolError(
+                        "Selected range + sync offset exceeds right preview bounds. Adjust t-start/t-end or offset."
+                    )
+                clip_start_abs = self.left_preview.absolute_frame_index(left_start_local)
+                clip_end_abs = self.left_preview.absolute_frame_index(left_end_local)
 
             self.save_settings()
 
@@ -1836,6 +1986,8 @@ class MainWindow(QMainWindow):
                 test_seconds=self.test_seconds_box.value(),
                 include_test_duration=self.use_test_duration_box.isChecked(),
                 source_mode=source_mode_for_pair(left, right),
+                clip_start_frame=clip_start_abs,
+                clip_end_frame=clip_end_abs,
             )
             script_path.write_text(text, encoding="utf-8")
             script_path.chmod(0o755)
